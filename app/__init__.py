@@ -1,0 +1,2 @@
+"""GearWeightCalculator application package."""
+
