@@ -78,6 +78,15 @@ CAP_PET_GEAR_OPTIONS: list[tuple[str, float]] = [
     ("紫色（+9）", 9.0),
     ("橙色（+12）", 12.0),
 ]
+ROLE_QUALITY_OPTIONS: list[tuple[str, str, float]] = [("\u767d", "white", -4.0), ("\u84dd", "blue", -2.0), ("\u6a59", "orange", 0.0), ("\u7d2b", "purple", 2.0)]
+ROLE_CRIT_RANGE_BY_MODE: dict[str, dict[str, tuple[float, float]]] = {
+    "melee": {"white": (8.0, 9.0), "blue": (10.0, 11.0), "orange": (12.0, 13.0), "purple": (14.0, 15.0)},
+    "ranged": {"white": (10.0, 11.0), "blue": (12.0, 13.0), "orange": (14.0, 15.0), "purple": (16.0, 17.0)},
+}
+ROLE_DODGE_RANGE_BY_MODE: dict[str, dict[str, tuple[float, float]]] = {
+    "melee": {"white": (3.0, 4.0), "blue": (5.0, 6.0), "orange": (7.0, 8.0), "purple": (9.0, 10.0)},
+    "ranged": {"white": (6.0, 7.0), "blue": (8.0, 9.0), "orange": (10.0, 11.0), "purple": (12.0, 13.0)},
+}
 CRIT_DODGE_PRESETS: dict[str, dict[str, float]] = {
     "melee": {
         "crit_equip": 43.0,
@@ -86,8 +95,9 @@ CRIT_DODGE_PRESETS: dict[str, dict[str, float]] = {
         "crit_self_full": 8.0,
         "crit_guild": 5.0,
         "crit_mystic": 10.0,
-        "dodge_equip": 36.0,
-        "dodge_rune": 6.0,
+        "pet_bonus": 0.0,
+        "dodge_equip": 0.0,
+        "dodge_rune": 0.0,
         "dodge_atlas": 0.0,
         "dodge_self_full": 8.0,
         "dodge_guild": 0.0,
@@ -95,14 +105,15 @@ CRIT_DODGE_PRESETS: dict[str, dict[str, float]] = {
         "quality": 2.0,
     },
     "ranged": {
-        "crit_equip": 42.0,
-        "crit_rune": 6.0,
-        "crit_atlas": 17.0,
+        "crit_equip": 44.0,
+        "crit_rune": 4.0,
+        "crit_atlas": 3.0,
         "crit_self_full": 11.0,
         "crit_guild": 5.0,
         "crit_mystic": 10.0,
-        "dodge_equip": 0.0,
-        "dodge_rune": 0.0,
+        "pet_bonus": 0.0,
+        "dodge_equip": 36.0,
+        "dodge_rune": 3.0,
         "dodge_atlas": 0.0,
         "dodge_self_full": 11.0,
         "dodge_guild": 0.0,
@@ -133,6 +144,7 @@ GROWTH_TABLE_ROWS = [
 ]
 ROLE_GEAR_SLOTS = ["武器", "头盔", "护甲", "护手", "鞋子", "腰带", "项链", "戒指"]
 ROLE_CHARACTER_NAMES = [f"角色{i:02d}" for i in range(1, 23)]
+ROLE_GEAR_STATS = ["\u653b\u901f", "\u66b4\u51fb", "\u66b4\u51fb\u4f24\u5bb3", "\u51cf\u4f24", "\u95ea\u907f"]
 
 THEME = """
 QWidget#RootContainer {
@@ -681,6 +693,10 @@ class MainWindow(QMainWindow):
     def _save_settings(self) -> None:
         if hasattr(self, "role_stat_table"):
             self._save_current_role_gear()
+        if hasattr(self, "role_cap_edits"):
+            self._save_current_role_caps()
+        if hasattr(self, "role_profile_edits"):
+            self._save_current_role_profile()
         data = {
             "current_category": self.current_category,
             "threshold": models.parse_float(self.threshold_edit.text(), "")[0],
@@ -694,24 +710,87 @@ class MainWindow(QMainWindow):
         with open(self.settings_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-    def _normalize_role_gear_store(self, raw: object) -> dict[str, list[list[str]]]:
-        normalized: dict[str, list[list[str]]] = {
-            role_name: [["", "", "", ""] for _ in ROLE_GEAR_SLOTS] for role_name in ROLE_CHARACTER_NAMES
+    def _empty_role_gear_rows(self) -> list[list[str]]:
+        return [["", "", "", "", "", "", ""] for _ in ROLE_GEAR_SLOTS]
+
+    def _empty_role_stat_caps(self) -> dict[str, str]:
+        return {stat: "" for stat in ROLE_GEAR_STATS}
+
+    def _default_role_profile(self) -> dict[str, str]:
+        return {
+            "mode": "melee",
+            "crit_quality_key": "orange",
+            "dodge_quality_key": "orange",
+            "pet_bonus": "0.0",
+            "crit_rune": "",
+            "dodge_rune": "",
+            "crit_atlas": self.saved_crit_atlas,
+            "dodge_atlas": self.saved_dodge_atlas,
+            "crit_self_full": "8",
+            "dodge_self_full": "8",
+            "crit_guild": "5",
+            "crit_mystic": "10",
+            "dodge_mystic": "10",
+            "as_base": "",
+            "as_trait_factor": "1",
+            "as_guild_bonus": "0",
+            "as_rune_bonus": "",
+            "as_mystic_bonus": "10",
+            "as_personality_bonus": "7.0",
+            "as_pet_bonus": "0.0",
+            "as_hunter_quality_bonus": "0.0",
+            "as_panel_actual": "",
+        }
+
+    def _normalize_role_gear_store(self, raw: object) -> dict[str, dict[str, object]]:
+        normalized: dict[str, dict[str, object]] = {
+            role_name: {
+                "gear_rows": self._empty_role_gear_rows(),
+                "stat_caps": self._empty_role_stat_caps(),
+                "role_profile": self._default_role_profile(),
+            }
+            for role_name in ROLE_CHARACTER_NAMES
         }
         if not isinstance(raw, dict):
             return normalized
 
         for role_name in ROLE_CHARACTER_NAMES:
-            role_rows = raw.get(role_name)
-            if not isinstance(role_rows, list):
+            role_entry = raw.get(role_name)
+            if isinstance(role_entry, list):
+                for row_idx in range(min(len(ROLE_GEAR_SLOTS), len(role_entry))):
+                    row_values = role_entry[row_idx]
+                    if not isinstance(row_values, list):
+                        continue
+                    for col_idx in range(min(4, len(row_values))):
+                        normalized[role_name]["gear_rows"][row_idx][col_idx] = str(row_values[col_idx]).strip()
                 continue
-            for row_idx in range(min(len(ROLE_GEAR_SLOTS), len(role_rows))):
-                row_values = role_rows[row_idx]
-                if not isinstance(row_values, list):
-                    continue
-                for col_idx in range(4):
-                    if col_idx < len(row_values):
-                        normalized[role_name][row_idx][col_idx] = str(row_values[col_idx]).strip()
+
+            if not isinstance(role_entry, dict):
+                continue
+
+            role_rows = role_entry.get("gear_rows")
+            if isinstance(role_rows, list):
+                for row_idx in range(min(len(ROLE_GEAR_SLOTS), len(role_rows))):
+                    row_values = role_rows[row_idx]
+                    if not isinstance(row_values, list):
+                        continue
+                    for col_idx in range(min(7, len(row_values))):
+                        normalized[role_name]["gear_rows"][row_idx][col_idx] = str(row_values[col_idx]).strip()
+
+            role_caps = role_entry.get("stat_caps")
+            if isinstance(role_caps, dict):
+                for stat in ROLE_GEAR_STATS:
+                    normalized[role_name]["stat_caps"][stat] = str(role_caps.get(stat, "")).strip()
+
+            role_profile = role_entry.get("role_profile")
+            if isinstance(role_profile, dict):
+                if "quality_key" in role_profile:
+                    role_profile.setdefault("crit_quality_key", role_profile.get("quality_key", "orange"))
+                    role_profile.setdefault("dodge_quality_key", role_profile.get("quality_key", "orange"))
+                if "crit_pet_bonus" in role_profile:
+                    role_profile.setdefault("pet_bonus", role_profile.get("crit_pet_bonus", "0.0"))
+                for key in normalized[role_name]["role_profile"].keys():
+                    normalized[role_name]["role_profile"][key] = str(role_profile.get(key, normalized[role_name]["role_profile"][key])).strip()
         return normalized
 
     def _build_ui(self) -> None:
@@ -1131,6 +1210,7 @@ class MainWindow(QMainWindow):
         for text, value in CAP_PET_GEAR_OPTIONS:
             self.crit_pet_gear_combo.addItem(text, value)
         self.crit_pet_gear_combo.setCurrentIndex(0)
+        self.crit_pet_gear_combo.currentIndexChanged.connect(self.check_crit_dodge_cap)
         self.crit_pet_gear_combo.setFixedWidth(SPEED_INPUT_WIDTH)
         crit_grid.addWidget(_cap_label("宠物装备", crit_card), 2, 0)
         crit_grid.addWidget(self.crit_pet_gear_combo, 2, 1)
@@ -1202,6 +1282,15 @@ class MainWindow(QMainWindow):
         self.dodge_mystic_edit.setFixedWidth(SPEED_INPUT_WIDTH)
         dodge_grid.addWidget(_cap_label("秘法闪避", dodge_card), 1, 4)
         dodge_grid.addWidget(self.dodge_mystic_edit, 1, 5)
+
+        self.dodge_pet_gear_combo = QComboBox(dodge_card)
+        for text, value in CAP_PET_GEAR_OPTIONS:
+            self.dodge_pet_gear_combo.addItem(text, value)
+        self.dodge_pet_gear_combo.setCurrentIndex(0)
+        self.dodge_pet_gear_combo.currentIndexChanged.connect(self.check_crit_dodge_cap)
+        self.dodge_pet_gear_combo.setFixedWidth(SPEED_INPUT_WIDTH)
+        dodge_grid.addWidget(_cap_label("宠物装备", dodge_card), 2, 0)
+        dodge_grid.addWidget(self.dodge_pet_gear_combo, 2, 1)
 
         self.dodge_total_edit = QLineEdit(dodge_card)
         self.dodge_total_edit.setText("")
@@ -1438,6 +1527,10 @@ class MainWindow(QMainWindow):
         quality_idx = self.cap_quality_combo.findData(float(preset["quality"]))
         if quality_idx >= 0:
             self.cap_quality_combo.setCurrentIndex(quality_idx)
+        pet_idx = self.crit_pet_gear_combo.findData(float(preset.get("pet_bonus", 0.0)))
+        self.crit_pet_gear_combo.setCurrentIndex(pet_idx if pet_idx >= 0 else 0)
+        if hasattr(self, "dodge_pet_gear_combo"):
+            self.dodge_pet_gear_combo.setCurrentIndex(pet_idx if pet_idx >= 0 else 0)
         self.crit_total_edit.setText("")
         self.dodge_total_edit.setText("")
 
@@ -1503,6 +1596,7 @@ class MainWindow(QMainWindow):
         dodge_equip, err_dodge_equip = self._parse_float_edit(self.dodge_current_edit, "装备闪避")
         dodge_rune, err_dodge_rune = self._parse_float_or_default(self.dodge_rune_edit, "符文闪避", 0.0)
         quality_bonus = float(self.cap_quality_combo.currentData())
+        pet_gear_bonus = float(self.dodge_pet_gear_combo.currentData()) if hasattr(self, "dodge_pet_gear_combo") else 0.0
 
         dodge_atlas, err_dodge_atlas = self._parse_float_or_default(self.dodge_atlas_edit, "图鉴闪避", 0.0)
         dodge_self_full, err_dodge_self_full = self._parse_float_or_default(
@@ -1536,6 +1630,7 @@ class MainWindow(QMainWindow):
             dodge_equip
             + dodge_rune
             + quality_bonus
+            + pet_gear_bonus
             + dodge_atlas
             + dodge_self_full
             + dodge_guild
@@ -1546,6 +1641,7 @@ class MainWindow(QMainWindow):
         total_dodge = (
             effective_dodge
             + quality_bonus
+            + pet_gear_bonus
             + dodge_atlas
             + dodge_self_full
             + dodge_guild
@@ -1638,30 +1734,169 @@ class MainWindow(QMainWindow):
         match_row.addWidget(btn_match_placeholder)
         role_layout.addLayout(match_row)
 
+        profile_card = QFrame(role_card)
+        profile_card.setObjectName("CardFrame")
+        profile_layout = QVBoxLayout(profile_card)
+        profile_layout.setContentsMargins(10, 10, 10, 10)
+        profile_layout.setSpacing(8)
+        profile_title = QLabel("英雄配置", profile_card)
+        profile_title.setObjectName("SectionTitle")
+        profile_layout.addWidget(profile_title)
+
+        profile_grid = QGridLayout()
+        profile_grid.setHorizontalSpacing(10)
+        profile_grid.setVerticalSpacing(8)
+
+        self.role_profile_mode_combo = QComboBox(profile_card)
+        self.role_profile_mode_combo.addItem("近战", "melee")
+        self.role_profile_mode_combo.addItem("远程", "ranged")
+        self.role_profile_mode_combo.currentIndexChanged.connect(self._on_role_profile_mode_changed)
+        profile_grid.addWidget(QLabel("模板", profile_card), 0, 0)
+        profile_grid.addWidget(self.role_profile_mode_combo, 0, 1)
+
+        self.role_profile_crit_quality_combo = QComboBox(profile_card)
+        for text, value, _bonus in ROLE_QUALITY_OPTIONS:
+            self.role_profile_crit_quality_combo.addItem(text, value)
+        self.role_profile_crit_quality_combo.currentIndexChanged.connect(self._on_role_profile_changed)
+        profile_grid.addWidget(QLabel("暴击品质", profile_card), 0, 2)
+        profile_grid.addWidget(self.role_profile_crit_quality_combo, 0, 3)
+
+        self.role_profile_dodge_quality_combo = QComboBox(profile_card)
+        for text, value, _bonus in ROLE_QUALITY_OPTIONS:
+            self.role_profile_dodge_quality_combo.addItem(text, value)
+        self.role_profile_dodge_quality_combo.currentIndexChanged.connect(self._on_role_profile_changed)
+        profile_grid.addWidget(QLabel("闪避品质", profile_card), 0, 4)
+        profile_grid.addWidget(self.role_profile_dodge_quality_combo, 0, 5)
+
+        self.role_profile_crit_pet_combo = QComboBox(profile_card)
+        for text, value in CAP_PET_GEAR_OPTIONS:
+            self.role_profile_crit_pet_combo.addItem(text, value)
+        self.role_profile_crit_pet_combo.currentIndexChanged.connect(self._on_role_profile_changed)
+        profile_grid.addWidget(QLabel("暴击宠物", profile_card), 1, 0)
+        profile_grid.addWidget(self.role_profile_crit_pet_combo, 1, 1)
+
+        self.role_profile_as_pet_combo = QComboBox(profile_card)
+        for text, value in PET_GEAR_SPEED_OPTIONS:
+            self.role_profile_as_pet_combo.addItem(text, value)
+        self.role_profile_as_pet_combo.currentIndexChanged.connect(self._on_role_profile_changed)
+        profile_grid.addWidget(QLabel("攻速宠物", profile_card), 1, 2)
+        profile_grid.addWidget(self.role_profile_as_pet_combo, 1, 3)
+
+        self.role_profile_personality_combo = QComboBox(profile_card)
+        for text, value in PERSONALITY_SPEED_OPTIONS:
+            self.role_profile_personality_combo.addItem(text, value)
+        self.role_profile_personality_combo.currentIndexChanged.connect(self._on_role_profile_changed)
+        profile_grid.addWidget(QLabel("性格", profile_card), 1, 4)
+        profile_grid.addWidget(self.role_profile_personality_combo, 1, 5)
+
+        self.role_profile_hunter_quality_combo = QComboBox(profile_card)
+        self.role_profile_hunter_quality_combo.addItem("无（0%）", 0.0)
+        for text, value in HUNTER_SPEED_QUALITY_OPTIONS:
+            self.role_profile_hunter_quality_combo.addItem(text, value)
+        self.role_profile_hunter_quality_combo.currentIndexChanged.connect(self._on_role_profile_changed)
+        profile_grid.addWidget(QLabel("攻速品质", profile_card), 2, 0)
+        profile_grid.addWidget(self.role_profile_hunter_quality_combo, 2, 1)
+
+        self.role_profile_edits: dict[str, QLineEdit] = {}
+        profile_fields = [
+            ("as_base", "\u6b66\u5668\u653b\u901f\u503c", 2, 2),
+            ("as_trait_factor", "\u7279\u6027\u7cfb\u6570", 2, 4),
+            ("as_guild_bonus", "\u653b\u901f\u516c\u4f1a(%)", 3, 0),
+            ("as_rune_bonus", "\u653b\u901f\u7b26\u6587(%)", 3, 2),
+            ("as_mystic_bonus", "\u653b\u901f\u79d8\u6cd5(%)", 3, 4),
+            ("as_panel_actual", "\u5b9e\u6d4b\u653b\u901f", 4, 0),
+            ("crit_rune", "\u66b4\u51fb\u7b26\u6587", 4, 2),
+            ("dodge_rune", "\u95ea\u907f\u7b26\u6587", 4, 4),
+            ("crit_atlas", "\u56fe\u9274\u66b4\u51fb", 5, 0),
+            ("dodge_atlas", "\u56fe\u9274\u95ea\u907f", 5, 2),
+            ("crit_guild", "\u66b4\u51fb\u516c\u4f1a", 5, 4),
+            ("crit_mystic", "\u66b4\u51fb\u79d8\u6cd5", 6, 0),
+            ("dodge_mystic", "\u95ea\u907f\u79d8\u6cd5", 6, 2),
+        ]
+        for key, label_text, row, col in profile_fields:
+            label = QLabel(label_text, profile_card)
+            edit = QLineEdit(profile_card)
+            edit.setFixedWidth(140)
+            edit.editingFinished.connect(self._on_role_profile_changed)
+            self.role_profile_edits[key] = edit
+            profile_grid.addWidget(label, row, col)
+            profile_grid.addWidget(edit, row, col + 1)
+
+        profile_layout.addLayout(profile_grid)
+        self.role_profile_hint_label = QLabel("\u8bf4\u660e: \u88c5\u5907\u8868\u586b\u88c5\u5907\u8bcd\u6761\uff1b\u66b4\u51fb\u548c\u95ea\u907f\u533a\u95f4\u7531\u54c1\u8d28\u9009\u62e9\u81ea\u52a8\u51b3\u5b9a\uff0c\u8fd9\u91cc\u53ea\u586b\u5176\u4f59\u53c2\u6570\u3002", profile_card)
+        self.role_profile_hint_label.setObjectName("IntroHint")
+        profile_layout.addWidget(self.role_profile_hint_label)
+        role_layout.addWidget(profile_card)
+
         self.role_stat_summary_label = QLabel("统计进度: 0/8 个部位已填写。", role_card)
         self.role_stat_summary_label.setObjectName("IntroItem")
         role_layout.addWidget(self.role_stat_summary_label)
 
-        self.role_stat_table = QTableWidget(len(ROLE_GEAR_SLOTS), 5, role_card)
-        self.role_stat_table.setHorizontalHeaderLabels(["部位", "当前装备", "主属性", "副属性", "备注"])
+        cap_row = QGridLayout()
+        cap_row.setHorizontalSpacing(10)
+        cap_row.setVerticalSpacing(8)
+        self.role_cap_edits: dict[str, QLineEdit] = {}
+        for idx, stat in enumerate(ROLE_GEAR_STATS):
+            label = QLabel(f"{stat}最大值", role_card)
+            edit = QLineEdit(role_card)
+            edit.setPlaceholderText("不填则不比较")
+            edit.setFixedWidth(140)
+            edit.editingFinished.connect(self._on_role_cap_changed)
+            self.role_cap_edits[stat] = edit
+            row = idx // 3
+            col = (idx % 3) * 2
+            cap_row.addWidget(label, row, col)
+            cap_row.addWidget(edit, row, col + 1)
+        btn_refresh_role = QPushButton("刷新角色统计", role_card)
+        btn_refresh_role.setObjectName("PrimaryButton")
+        btn_refresh_role.clicked.connect(self._refresh_role_stat_overview)
+        cap_row.addWidget(btn_refresh_role, 1, 4)
+        role_layout.addLayout(cap_row)
+        self.role_summary_table = QTableWidget(len(ROLE_GEAR_STATS), 5, role_card)
+        self.role_summary_table.setHorizontalHeaderLabels(["\u5c5e\u6027", "\u5f53\u524d\u603b\u503c", "\u6700\u5927\u503c", "\u8fbe\u6210\u5ea6", "\u72b6\u6001"])
+        self.role_summary_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.role_summary_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.role_summary_table.verticalHeader().setVisible(False)
+        self.role_summary_table.verticalHeader().setDefaultSectionSize(32)
+        self.role_summary_table.setAlternatingRowColors(True)
+        self.role_summary_table.setWordWrap(False)
+        self.role_summary_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.role_summary_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        for row_idx, stat in enumerate(ROLE_GEAR_STATS):
+            for col_idx, value in enumerate([stat, "0", "-", "-", "\u672a\u8bbe\u7f6e\u6700\u5927\u503c"]):
+                item = QTableWidgetItem(value)
+                item.setTextAlignment(Qt.AlignCenter)
+                self.role_summary_table.setItem(row_idx, col_idx, item)
+        self.role_summary_table.resizeColumnsToContents()
+        summary_height = self.role_summary_table.horizontalHeader().height() + self.role_summary_table.rowCount() * self.role_summary_table.verticalHeader().defaultSectionSize() + 8
+        self.role_summary_table.setMinimumHeight(summary_height)
+        self.role_summary_table.setMaximumHeight(summary_height + 4)
+        role_layout.addWidget(self.role_summary_table)
+
+        self.role_stat_table = QTableWidget(len(ROLE_GEAR_SLOTS), 8, role_card)
+        self.role_stat_table.setHorizontalHeaderLabels(["\u90e8\u4f4d", "\u5f53\u524d\u88c5\u5907", "\u653b\u901f", "\u66b4\u51fb", "\u66b4\u51fb\u4f24\u5bb3", "\u51cf\u4f24", "\u95ea\u907f", "\u5907\u6ce8"])
         self.role_stat_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.role_stat_table.verticalHeader().setVisible(False)
         self.role_stat_table.verticalHeader().setDefaultSectionSize(34)
+        self.role_stat_table.setAlternatingRowColors(True)
+        self.role_stat_table.setWordWrap(False)
+        self.role_stat_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.role_stat_table.blockSignals(True)
         for row_idx, slot in enumerate(ROLE_GEAR_SLOTS):
             slot_item = QTableWidgetItem(slot)
             slot_item.setFlags(slot_item.flags() & ~Qt.ItemIsEditable)
             slot_item.setTextAlignment(Qt.AlignCenter)
             self.role_stat_table.setItem(row_idx, 0, slot_item)
-            for col_idx in range(1, 5):
+            for col_idx in range(1, 8):
                 item = QTableWidgetItem("")
-                item.setTextAlignment(Qt.AlignCenter if col_idx < 4 else Qt.AlignLeft | Qt.AlignVCenter)
+                item.setTextAlignment(Qt.AlignCenter if col_idx < 7 else Qt.AlignLeft | Qt.AlignVCenter)
                 self.role_stat_table.setItem(row_idx, col_idx, item)
         self.role_stat_table.blockSignals(False)
         self.role_stat_table.itemChanged.connect(self._on_role_stat_table_changed)
         self.role_stat_table.resizeColumnsToContents()
+        stat_height = self.role_stat_table.horizontalHeader().height() + self.role_stat_table.rowCount() * self.role_stat_table.verticalHeader().defaultSectionSize() + 8
+        self.role_stat_table.setMinimumHeight(stat_height)
         role_layout.addWidget(self.role_stat_table)
-
         self.match_placeholder_label = QLabel("状态: 未开始。点击“开始历史配对（占位）”生成占位结果。", role_card)
         self.match_placeholder_label.setObjectName("IntroItem")
         role_layout.addWidget(self.match_placeholder_label)
@@ -1676,6 +1911,8 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(role_card, 1)
         self._load_role_gear_to_table(self.current_role_name)
+        self._load_role_caps(self.current_role_name)
+        self._load_role_profile(self.current_role_name)
         self._refresh_role_stat_overview()
 
     def _on_role_changed(self, _index: int) -> None:
@@ -1685,8 +1922,13 @@ class MainWindow(QMainWindow):
         if not selected_role or selected_role == self.current_role_name:
             return
         self._save_current_role_gear()
+        self._save_current_role_caps()
+        self._save_current_role_profile()
         self.current_role_name = selected_role
         self._load_role_gear_to_table(self.current_role_name)
+        self._load_role_caps(self.current_role_name)
+        self._load_role_profile(self.current_role_name)
+        self._refresh_role_stat_overview()
         if hasattr(self, "match_placeholder_label"):
             self.match_placeholder_label.setText("状态: 未开始。点击“开始历史配对（占位）”生成占位结果。")
         if hasattr(self, "match_preview_table"):
@@ -1700,27 +1942,107 @@ class MainWindow(QMainWindow):
         self._refresh_role_stat_overview()
         self._save_settings()
 
+    def _refresh_role_quality_combo_labels(self) -> None:
+        crit_current = str(self.role_profile_crit_quality_combo.currentData()) if hasattr(self, "role_profile_crit_quality_combo") else "orange"
+        dodge_current = str(self.role_profile_dodge_quality_combo.currentData()) if hasattr(self, "role_profile_dodge_quality_combo") else "orange"
+        if hasattr(self, "role_profile_crit_quality_combo"):
+            self.role_profile_crit_quality_combo.blockSignals(True)
+            self.role_profile_crit_quality_combo.clear()
+            for label, key, bonus in ROLE_QUALITY_OPTIONS:
+                self.role_profile_crit_quality_combo.addItem(f"{label}（{bonus:+g}）", key)
+            idx = self.role_profile_crit_quality_combo.findData(crit_current)
+            self.role_profile_crit_quality_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            self.role_profile_crit_quality_combo.blockSignals(False)
+        if hasattr(self, "role_profile_dodge_quality_combo"):
+            self.role_profile_dodge_quality_combo.blockSignals(True)
+            self.role_profile_dodge_quality_combo.clear()
+            for label, key, bonus in ROLE_QUALITY_OPTIONS:
+                self.role_profile_dodge_quality_combo.addItem(f"{label}（{bonus:+g}）", key)
+            idx = self.role_profile_dodge_quality_combo.findData(dodge_current)
+            self.role_profile_dodge_quality_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            self.role_profile_dodge_quality_combo.blockSignals(False)
+
+    def _get_role_quality_bonuses(self) -> tuple[float, float]:
+        crit_key = str(self.role_profile_crit_quality_combo.currentData()) if hasattr(self, "role_profile_crit_quality_combo") else "orange"
+        dodge_key = str(self.role_profile_dodge_quality_combo.currentData()) if hasattr(self, "role_profile_dodge_quality_combo") else "orange"
+        bonus_map = {key: bonus for _label, key, bonus in ROLE_QUALITY_OPTIONS}
+        return bonus_map.get(crit_key, 0.0), bonus_map.get(dodge_key, 0.0)
+
+    def _apply_role_profile_base_stats(self) -> None:
+        if not hasattr(self, "role_profile_edits"):
+            return
+        self._refresh_role_quality_combo_labels()
+        mode = str(self.role_profile_mode_combo.currentData()) if hasattr(self, "role_profile_mode_combo") else "melee"
+        preset = CRIT_DODGE_PRESETS.get(mode, CRIT_DODGE_PRESETS["melee"])
+        self.role_profile_edits["crit_guild"].setText(f"{preset['crit_guild']:g}")
+        self.role_profile_edits["crit_mystic"].setText(f"{preset['crit_mystic']:g}")
+        self.role_profile_edits["dodge_mystic"].setText(f"{preset['dodge_mystic']:g}")
+    def _on_role_profile_mode_changed(self, _index: int) -> None:
+        self._apply_role_profile_base_stats()
+        self._on_role_profile_changed()
+
+    def _on_role_profile_changed(self) -> None:
+        self._save_current_role_profile()
+        self._refresh_role_stat_overview()
+        self._save_settings()
+
     def _save_current_role_gear(self) -> None:
         if not hasattr(self, "role_stat_table"):
             return
         rows: list[list[str]] = []
         for row_idx in range(len(ROLE_GEAR_SLOTS)):
             row_values: list[str] = []
-            for col_idx in range(1, 5):
+            for col_idx in range(1, 8):
                 item = self.role_stat_table.item(row_idx, col_idx)
                 row_values.append("" if item is None else item.text().strip())
             rows.append(row_values)
-        self.role_gear_store[self.current_role_name] = rows
+        role_entry = self.role_gear_store.setdefault(
+            self.current_role_name,
+            {"gear_rows": self._empty_role_gear_rows(), "stat_caps": self._empty_role_stat_caps(), "role_profile": self._default_role_profile()},
+        )
+        role_entry["gear_rows"] = rows
+
+    def _save_current_role_caps(self) -> None:
+        if not hasattr(self, "role_cap_edits"):
+            return
+        role_entry = self.role_gear_store.setdefault(
+            self.current_role_name,
+            {"gear_rows": self._empty_role_gear_rows(), "stat_caps": self._empty_role_stat_caps(), "role_profile": self._default_role_profile()},
+        )
+        role_entry["stat_caps"] = {stat: edit.text().strip() for stat, edit in self.role_cap_edits.items()}
+
+    def _save_current_role_profile(self) -> None:
+        if not hasattr(self, "role_profile_edits"):
+            return
+        role_entry = self.role_gear_store.setdefault(
+            self.current_role_name,
+            {"gear_rows": self._empty_role_gear_rows(), "stat_caps": self._empty_role_stat_caps(), "role_profile": self._default_role_profile()},
+        )
+        profile = self._default_role_profile()
+        profile["mode"] = str(self.role_profile_mode_combo.currentData())
+        profile["crit_quality_key"] = str(self.role_profile_crit_quality_combo.currentData())
+        profile["dodge_quality_key"] = str(self.role_profile_dodge_quality_combo.currentData())
+        profile["pet_bonus"] = str(self.role_profile_crit_pet_combo.currentData())
+        profile["as_pet_bonus"] = str(self.role_profile_as_pet_combo.currentData())
+        profile["as_personality_bonus"] = str(self.role_profile_personality_combo.currentData())
+        profile["as_hunter_quality_bonus"] = str(self.role_profile_hunter_quality_combo.currentData())
+        for key, edit in self.role_profile_edits.items():
+            profile[key] = edit.text().strip()
+        role_entry["role_profile"] = profile
 
     def _load_role_gear_to_table(self, role_name: str) -> None:
         if not hasattr(self, "role_stat_table"):
             return
-        rows = self.role_gear_store.get(role_name, [["", "", "", ""] for _ in ROLE_GEAR_SLOTS])
+        role_entry = self.role_gear_store.get(
+            role_name,
+            {"gear_rows": self._empty_role_gear_rows(), "stat_caps": self._empty_role_stat_caps(), "role_profile": self._default_role_profile()},
+        )
+        rows = role_entry.get("gear_rows", self._empty_role_gear_rows())
         self._role_gear_loading = True
         self.role_stat_table.blockSignals(True)
         for row_idx in range(len(ROLE_GEAR_SLOTS)):
-            row_values = rows[row_idx] if row_idx < len(rows) else ["", "", "", ""]
-            for col_idx in range(1, 5):
+            row_values = rows[row_idx] if row_idx < len(rows) else ["", "", "", "", "", "", ""]
+            for col_idx in range(1, 8):
                 text_value = row_values[col_idx - 1] if col_idx - 1 < len(row_values) else ""
                 item = self.role_stat_table.item(row_idx, col_idx)
                 if item is None:
@@ -1730,30 +2052,214 @@ class MainWindow(QMainWindow):
         self.role_stat_table.blockSignals(False)
         self._role_gear_loading = False
 
+    def _load_role_caps(self, role_name: str) -> None:
+        if not hasattr(self, "role_cap_edits"):
+            return
+        role_entry = self.role_gear_store.get(
+            role_name,
+            {"gear_rows": self._empty_role_gear_rows(), "stat_caps": self._empty_role_stat_caps(), "role_profile": self._default_role_profile()},
+        )
+        caps = role_entry.get("stat_caps", self._empty_role_stat_caps())
+        for stat, edit in self.role_cap_edits.items():
+            edit.setText(str(caps.get(stat, "")).strip())
+
+    def _load_role_profile(self, role_name: str) -> None:
+        if not hasattr(self, "role_profile_edits"):
+            return
+        role_entry = self.role_gear_store.get(
+            role_name,
+            {"gear_rows": self._empty_role_gear_rows(), "stat_caps": self._empty_role_stat_caps(), "role_profile": self._default_role_profile()},
+        )
+        profile = dict(self._default_role_profile())
+        profile.update(role_entry.get("role_profile", {}))
+        self.role_profile_mode_combo.blockSignals(True)
+        idx = self.role_profile_mode_combo.findData(profile["mode"])
+        self.role_profile_mode_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.role_profile_mode_combo.blockSignals(False)
+        self._refresh_role_quality_combo_labels()
+        self.role_profile_crit_quality_combo.blockSignals(True)
+        idx = self.role_profile_crit_quality_combo.findData(str(profile.get("crit_quality_key", "orange")))
+        self.role_profile_crit_quality_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.role_profile_crit_quality_combo.blockSignals(False)
+        self.role_profile_dodge_quality_combo.blockSignals(True)
+        idx = self.role_profile_dodge_quality_combo.findData(str(profile.get("dodge_quality_key", "orange")))
+        self.role_profile_dodge_quality_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.role_profile_dodge_quality_combo.blockSignals(False)
+        for combo, key in [
+            (self.role_profile_crit_pet_combo, "pet_bonus"),
+            (self.role_profile_as_pet_combo, "as_pet_bonus"),
+            (self.role_profile_personality_combo, "as_personality_bonus"),
+            (self.role_profile_hunter_quality_combo, "as_hunter_quality_bonus"),
+        ]:
+            combo.blockSignals(True)
+            try:
+                value = float(profile[key])
+            except Exception:
+                value = 0.0
+            idx = combo.findData(value)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            combo.blockSignals(False)
+        self._apply_role_profile_base_stats()
+        for key, edit in self.role_profile_edits.items():
+            edit.setText(str(profile.get(key, "")))
+
+    def _on_role_cap_changed(self) -> None:
+        self._save_current_role_caps()
+        self._refresh_role_stat_overview()
+        self._save_settings()
     def _clear_current_role_gear(self) -> None:
-        self.role_gear_store[self.current_role_name] = [["", "", "", ""] for _ in ROLE_GEAR_SLOTS]
+        self.role_gear_store[self.current_role_name] = {
+            "gear_rows": self._empty_role_gear_rows(),
+            "stat_caps": self._empty_role_stat_caps(),
+            "role_profile": self._default_role_profile(),
+        }
         self._load_role_gear_to_table(self.current_role_name)
+        self._load_role_caps(self.current_role_name)
+        self._load_role_profile(self.current_role_name)
         self._refresh_role_stat_overview()
         if hasattr(self, "match_preview_table"):
             self.match_preview_table.setRowCount(0)
         if hasattr(self, "match_placeholder_label"):
-            self.match_placeholder_label.setText("状态: 已清空当前角色装备。")
+            self.match_placeholder_label.setText("\u72b6\u6001: \u5df2\u6e05\u7a7a\u5f53\u524d\u89d2\u8272\u88c5\u5907\u3002")
         self._save_settings()
 
     def _refresh_role_stat_overview(self) -> None:
         if not hasattr(self, "role_stat_table") or not hasattr(self, "role_stat_summary_label"):
             return
         filled = 0
+        stat_totals = {stat: 0.0 for stat in ROLE_GEAR_STATS}
+        has_invalid = False
         for row_idx in range(self.role_stat_table.rowCount()):
             equip_item = self.role_stat_table.item(row_idx, 1)
             if equip_item and equip_item.text().strip():
                 filled += 1
+            for stat_idx, stat in enumerate(ROLE_GEAR_STATS, start=2):
+                item = self.role_stat_table.item(row_idx, stat_idx)
+                raw_text = "" if item is None else item.text().strip()
+                if item is not None:
+                    item.setBackground(Qt.white)
+                if raw_text == "":
+                    continue
+                try:
+                    stat_totals[stat] += float(raw_text)
+                except ValueError:
+                    has_invalid = True
+                    if item is not None:
+                        item.setBackground(Qt.red)
         self.role_stat_summary_label.setText(
-            f"{self.current_role_name} 统计进度: {filled}/{len(ROLE_GEAR_SLOTS)} 个部位已填写。"
+            f"{self.current_role_name} \u7edf\u8ba1\u8fdb\u5ea6: {filled}/{len(ROLE_GEAR_SLOTS)} \u4e2a\u90e8\u4f4d\u5df2\u586b\u5199\u3002"
         )
 
+        profile = self._default_role_profile()
+        role_entry = self.role_gear_store.get(self.current_role_name, {})
+        if isinstance(role_entry, dict):
+            profile.update(role_entry.get("role_profile", {}))
+
+        def _f(key: str, default: float = 0.0) -> float:
+            try:
+                return float(profile.get(key, "") or default)
+            except Exception:
+                return default
+
+        speed_stat = ROLE_GEAR_STATS[0]
+        crit_stat = ROLE_GEAR_STATS[1]
+        crit_damage_stat = ROLE_GEAR_STATS[2]
+        reduction_stat = ROLE_GEAR_STATS[3]
+        dodge_stat = ROLE_GEAR_STATS[4]
+
+        attack_actual = 0.0
+        attack_status = "\u7f3a\u5c11\u6b66\u5668\u653b\u901f\u503c"
+        attack_target = self.role_cap_edits[speed_stat].text().strip() if hasattr(self, "role_cap_edits") else ""
+        base = _f("as_base", 0.0)
+        trait = _f("as_trait_factor", 1.0)
+        guild_as = _f("as_guild_bonus", 0.0)
+        rune_as = _f("as_rune_bonus", 0.0)
+        mystic_as = _f("as_mystic_bonus", 10.0)
+        personality_as = _f("as_personality_bonus", 0.0)
+        pet_as = _f("as_pet_bonus", 0.0)
+        hunter_quality_as = _f("as_hunter_quality_bonus", 0.0)
+        equip_as = stat_totals[speed_stat]
+        if base > 0:
+            total_bonus_percent = equip_as + guild_as + rune_as + mystic_as + personality_as + pet_as + hunter_quality_as
+            attack_actual = max((1.0 - total_bonus_percent / 100.0) * base / max(trait, 1e-9), ATTACK_SPEED_FLOOR)
+            if attack_target:
+                try:
+                    target_val = max(float(attack_target), ATTACK_SPEED_FLOOR)
+                    attack_status = "\u5df2\u8fbe\u5230" if attack_actual <= target_val else f"\u8d85\u51fa {attack_actual - target_val:.3f}"
+                except Exception:
+                    attack_status = "\u6700\u5927\u503c\u975e\u6cd5"
+            else:
+                attack_status = f"\u88c5\u5907\u653b\u901f\u52a0\u6210 {equip_as:.3f}%"
+
+        crit_quality_bonus, dodge_quality_bonus = self._get_role_quality_bonuses() if hasattr(self, "role_profile_crit_quality_combo") else (0.0, 0.0)
+
+        mode = str(self.role_profile_mode_combo.currentData()) if hasattr(self, "role_profile_mode_combo") else "melee"
+        preset = CRIT_DODGE_PRESETS.get(mode, CRIT_DODGE_PRESETS["melee"])
+
+        crit_cap_text = self.role_cap_edits[crit_stat].text().strip() if hasattr(self, "role_cap_edits") else ""
+        crit_cap = float(crit_cap_text) if crit_cap_text else DEFAULT_CRIT_TARGET
+        crit_base = min(stat_totals[crit_stat] + _f("crit_rune", 0.0), crit_cap)
+        pet_bonus = _f("pet_bonus", _f("crit_pet_bonus", 0.0))
+        crit_total = crit_base + crit_quality_bonus + pet_bonus + _f("crit_atlas", 0.0) + preset.get("crit_self_full", 0.0) + _f("crit_guild", 0.0) + _f("crit_mystic", 0.0)
+
+        dodge_cap_text = self.role_cap_edits[dodge_stat].text().strip() if hasattr(self, "role_cap_edits") else ""
+        dodge_cap = float(dodge_cap_text) if dodge_cap_text else DEFAULT_DODGE_TARGET
+        dodge_base = min(stat_totals[dodge_stat] + _f("dodge_rune", 0.0), dodge_cap)
+        dodge_total = dodge_base + dodge_quality_bonus + pet_bonus + _f("dodge_atlas", 0.0) + preset.get("dodge_self_full", 0.0) + _f("dodge_mystic", 0.0)
+
+        actual_values = {
+            speed_stat: attack_actual,
+            crit_stat: crit_total,
+            crit_damage_stat: stat_totals[crit_damage_stat],
+            reduction_stat: stat_totals[reduction_stat],
+            dodge_stat: dodge_total,
+        }
+        if hasattr(self, "role_summary_table"):
+            for row_idx, stat in enumerate(ROLE_GEAR_STATS):
+                actual_value = actual_values[stat]
+                max_text = self.role_cap_edits[stat].text().strip() if hasattr(self, "role_cap_edits") else ""
+                percent_text = "-"
+                actual_display = f"{actual_value[0]:.3f}~{actual_value[1]:.3f}" if isinstance(actual_value, tuple) else f"{actual_value:.3f}"
+                if stat == speed_stat and attack_status == "\u7f3a\u5c11\u6b66\u5668\u653b\u901f\u503c":
+                    status_text = attack_status
+                elif max_text:
+                    try:
+                        max_value = float(max_text)
+                        if stat == speed_stat:
+                            percent_text = f"{(max_value / actual_value * 100.0):.1f}%" if actual_value > 0 else "-"
+                            status_text = "\u5df2\u8fbe\u5230" if actual_value <= max_value else f"\u8d85\u51fa {actual_value - max_value:.3f}"
+                        elif isinstance(actual_value, tuple):
+                            percent_text = f"{(actual_value[1] / max_value * 100.0):.1f}%" if max_value > 0 else "-"
+                            if actual_value[0] >= max_value:
+                                status_text = "\u5df2\u8fbe\u5230"
+                            elif actual_value[1] >= max_value:
+                                status_text = "\u53ef\u80fd\u8fbe\u5230"
+                            else:
+                                status_text = f"\u8fd8\u5dee {max_value - actual_value[1]:.3f}"
+                        elif max_value > 0:
+                            percent = actual_value / max_value * 100.0
+                            percent_text = f"{percent:.1f}%"
+                            status_text = "\u5df2\u8fbe\u5230" if actual_value >= max_value else f"\u8fd8\u5dee {max_value - actual_value:.3f}"
+                        else:
+                            status_text = "\u6700\u5927\u503c\u9700\u5927\u4e8e 0"
+                    except Exception:
+                        status_text = "\u6700\u5927\u503c\u975e\u6cd5"
+                else:
+                    status_text = attack_status if stat == speed_stat else "\u672a\u8bbe\u7f6e\u6700\u5927\u503c"
+                row_values = [stat, actual_display, max_text or "-", percent_text, status_text]
+                for col_idx, value in enumerate(row_values):
+                    item = self.role_summary_table.item(row_idx, col_idx)
+                    if item is None:
+                        item = QTableWidgetItem("")
+                        self.role_summary_table.setItem(row_idx, col_idx, item)
+                    item.setText(value)
+                    item.setTextAlignment(Qt.AlignCenter)
+            self.role_summary_table.resizeColumnsToContents()
+        if has_invalid and hasattr(self, "match_placeholder_label"):
+            self.match_placeholder_label.setText("状态: 存在非法数值，已用红框标记。")
     def run_match_placeholder(self) -> None:
         self._save_current_role_gear()
+        self._save_current_role_caps()
         self._refresh_role_stat_overview()
         mode = str(self.match_mode_combo.currentData()) if hasattr(self, "match_mode_combo") else "single"
         goal = str(self.match_goal_combo.currentData()) if hasattr(self, "match_goal_combo") else "threshold"
