@@ -5,7 +5,6 @@ from datetime import datetime
 from typing import Any, Iterable
 
 
-FIELD_COUNT = 5
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 MAX_SORT_RULES = 3
 TEXT_SORT_FIELDS = {"category", "name"}
@@ -31,12 +30,14 @@ class EquipRecord:
     pass_threshold: bool
     created_at: str
 
-    def to_export_row(self) -> list[str]:
+    def to_export_row(self, field_count: int) -> list[str]:
+        fixed_attrs = _normalize_numeric_list(self.attrs, field_count)
+        fixed_weights = _normalize_numeric_list(self.weights, field_count)
         return [
             self.category,
             self.name,
-            *[_fmt_number(v) for v in self.attrs[:FIELD_COUNT]],
-            *[_fmt_number(v) for v in self.weights[:FIELD_COUNT]],
+            *[_fmt_number(v) for v in fixed_attrs],
+            *[_fmt_number(v) for v in fixed_weights],
             f"{self.score:.3f}",
             "true" if self.pass_threshold else "false",
             self.created_at,
@@ -73,7 +74,7 @@ def safe_numeric_list(
 
 
 def compute_contributions(attrs: list[float], weights: list[float]) -> list[float]:
-    return [a * w for a, w in zip(attrs[:FIELD_COUNT], weights[:FIELD_COUNT])]
+    return [a * w for a, w in zip(attrs, weights)]
 
 
 def evaluate_threshold(score: float, threshold: float) -> bool:
@@ -81,12 +82,14 @@ def evaluate_threshold(score: float, threshold: float) -> bool:
 
 
 def calculate(attrs: list[float], weights: list[float], threshold: float) -> CalculationSnapshot:
-    contributions = compute_contributions(attrs, weights)
+    values = _normalize_numeric_list(attrs, max(len(attrs), len(weights)))
+    coeffs = _normalize_numeric_list(weights, len(values))
+    contributions = compute_contributions(values, coeffs)
     score = sum(contributions)
     passed = evaluate_threshold(score, threshold)
     return CalculationSnapshot(
-        attrs=attrs[:FIELD_COUNT],
-        weights=weights[:FIELD_COUNT],
+        attrs=values,
+        weights=coeffs,
         threshold=threshold,
         contributions=contributions,
         score=score,
@@ -184,3 +187,10 @@ def _to_text(value: Any) -> str:
 
 def _fmt_number(value: float) -> str:
     return f"{value:g}"
+
+
+def _normalize_numeric_list(values: list[float], size: int) -> list[float]:
+    fixed = [float(v) for v in values[:size]]
+    while len(fixed) < size:
+        fixed.append(0.0)
+    return fixed

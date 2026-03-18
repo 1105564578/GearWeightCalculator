@@ -5,12 +5,14 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
     QComboBox,
     QFileDialog,
     QGridLayout,
+    QHeaderView,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -32,9 +34,10 @@ from app.core import EquipRecord, MAX_SORT_RULES, TIME_FORMAT, sort_records
 
 
 ERROR_STYLE = "border: 1px solid #d93025;"
-DEFAULT_ATTR_NAMES = [f"属性{i}" for i in range(1, 6)]
-DEFAULT_COEFF_NAMES = [f"系数{i}" for i in range(1, 6)]
+DEFAULT_ATTR_NAMES = ["攻击", "暴击", "命中"]
+DEFAULT_COEFF_NAMES = ["权重1", "权重2", "权重3"]
 DEFAULT_CATEGORIES = ["通用", "武器", "头盔", "护甲", "鞋子"]
+DEFAULT_ROLE_NAME = "角色01"
 APP_DIRNAME = ".gear_weight_calculator"
 ATTACK_SPEED_FLOOR = 0.25
 DEFAULT_ATTACK_SPEED_TARGET = 0.25
@@ -142,9 +145,12 @@ GROWTH_TABLE_ROWS = [
     ("成长石", "装备养成", "", "", "按资料表手动填写"),
     ("符文碎片", "符文培养", "", "", "按资料表手动填写"),
 ]
-ROLE_GEAR_SLOTS = ["武器", "头盔", "护甲", "护手", "鞋子", "腰带", "项链", "戒指"]
-ROLE_CHARACTER_NAMES = [f"角色{i:02d}" for i in range(1, 23)]
-ROLE_GEAR_STATS = ["\u653b\u901f", "\u66b4\u51fb", "\u66b4\u51fb\u4f24\u5bb3", "\u51cf\u4f24", "\u95ea\u907f"]
+ROLE_GEAR_SLOTS = ["武器", "头盔", "护甲", "护手", "鞋子", "腰带", "项链", "戒指", "符文"]
+DEFAULT_ROLE_GEAR_STATS = ["攻速", "暴击", "暴击伤害", "减伤", "闪避"]
+ROLE_TARGET_STATS = set(DEFAULT_ROLE_GEAR_STATS)
+
+ROLE_TARGET_SUMMARY_LABEL = "目标总和"
+ROLE_CURRENT_SUMMARY_LABEL = "当前总和"
 
 THEME = """
 QWidget#RootContainer {
@@ -153,7 +159,7 @@ QWidget#RootContainer {
 QMainWindow, QWidget {
     background-color: transparent;
     color: #111827;
-    font-family: 'Segoe UI', 'Microsoft YaHei UI';
+    font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', 'Segoe UI';
     font-size: 13px;
 }
 QFrame#NavBar {
@@ -256,7 +262,8 @@ QPushButton#LaunchEntry {
     border: 1px solid #d1d5db;
     background-color: #ffffff;
     color: #111827;
-    padding: 12px 14px;
+    padding: 0 14px;
+    min-height: 42px;
     font-size: 13px;
     font-weight: 700;
 }
@@ -269,7 +276,8 @@ QPushButton#LaunchPrimary {
     border: 1px solid #1d4ed8;
     background-color: #2563eb;
     color: #ffffff;
-    padding: 12px 14px;
+    padding: 0 14px;
+    min-height: 42px;
     font-size: 13px;
     font-weight: 700;
 }
@@ -405,6 +413,7 @@ QTableWidget {
     alternate-background-color: #f9fafb;
     selection-background-color: #dbeafe;
     selection-color: #111827;
+    padding: 0;
 }
 QHeaderView::section {
     background-color: #f3f4f6;
@@ -412,6 +421,10 @@ QHeaderView::section {
     color: #374151;
     font-weight: 700;
     padding: 8px;
+}
+QTableWidget::item:selected {
+    background-color: #dbeafe;
+    color: #111827;
 }
 """
 
@@ -442,18 +455,8 @@ class SortRuleRow(QWidget):
         self.priority_label.setFixedWidth(90)
 
         self.field_combo = QComboBox(self)
-        for text, value in [
-            ("装备种类", "category"),
-            ("装备名", "name"),
-            ("属性1(a1)", "a1"),
-            ("属性2(a2)", "a2"),
-            ("属性3(a3)", "a3"),
-            ("属性4(a4)", "a4"),
-            ("属性5(a5)", "a5"),
-            ("总分", "score"),
-            ("保存时间", "created_at"),
-        ]:
-            self.field_combo.addItem(text, value)
+        self._field_items: list[tuple[str, str]] = []
+        self.update_field_options([])
 
         self.direction_combo = QComboBox(self)
         self.direction_combo.addItem("降序", False)
@@ -479,6 +482,22 @@ class SortRuleRow(QWidget):
 
     def set_priority(self, index: int) -> None:
         self.priority_label.setText(f"优先级 {index}")
+
+    def update_field_options(self, attr_names: list[str]) -> None:
+        current_field = str(self.field_combo.currentData()) if self.field_combo.count() else "score"
+        self._field_items = [("装备种类", "category"), ("装备名", "name")]
+        for idx, attr_name in enumerate(attr_names, start=1):
+            label = attr_name.strip() or f"属性{idx}"
+            self._field_items.append((f"{label}(a{idx})", f"a{idx}"))
+        self._field_items.extend([("总分", "score"), ("保存时间", "created_at")])
+
+        self.field_combo.blockSignals(True)
+        self.field_combo.clear()
+        for text, value in self._field_items:
+            self.field_combo.addItem(text, value)
+        idx = self.field_combo.findData(current_field)
+        self.field_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.field_combo.blockSignals(False)
 
     def set_rule(self, field: str, asc: bool) -> None:
         idx = self.field_combo.findData(field)
@@ -538,7 +557,7 @@ class LaunchPadPage(QWidget):
         nav_layout.addWidget(self._make_intro_item("装备评分：进入主功能页面。"))
         nav_layout.addWidget(self._make_intro_item("攻速与达标：计算攻速、暴击和闪避达标情况。"))
         nav_layout.addWidget(self._make_intro_item("配装推荐：生成词条优先级，附带养成成本表。"))
-        nav_layout.addWidget(self._make_intro_item("角色装备：维护 22 个角色的装备统计与占位配对。"))
+        nav_layout.addWidget(self._make_intro_item("角色装备：按角色保存装备，并预留历史装备自动配对。"))
         nav_layout.addWidget(self._make_intro_item("设置：进入设置页修改保存目录。"))
         root.addWidget(nav_card)
 
@@ -597,7 +616,8 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("GearWeightCalculator")
-        self.resize(1760, 1020)
+        self.resize(1360, 860)
+        self.setMinimumSize(1100, 700)
         self.setStyleSheet(THEME)
 
         self.records: list[EquipRecord] = []
@@ -609,6 +629,7 @@ class MainWindow(QMainWindow):
         self.weight_name_edits: list[QLineEdit] = []
         self.attr_value_edits: list[QLineEdit] = []
         self.weight_value_edits: list[QLineEdit] = []
+        self.scheme_row_widgets: list[dict[str, QWidget]] = []
 
         self.bootstrap_dir = Path.home() / APP_DIRNAME
         self.bootstrap_path = self.bootstrap_dir / "bootstrap.json"
@@ -623,9 +644,13 @@ class MainWindow(QMainWindow):
         self.global_threshold = float(settings.get("threshold", 0.0))
         self.saved_crit_atlas = str(settings.get("cap_crit_atlas", "0"))
         self.saved_dodge_atlas = str(settings.get("cap_dodge_atlas", "0"))
+        raw_role_stat_names = settings.get("role_stat_names", DEFAULT_ROLE_GEAR_STATS[:])
+        self.role_stat_names = [str(item).strip() for item in raw_role_stat_names if str(item).strip()] or DEFAULT_ROLE_GEAR_STATS[:]
         self.role_gear_store = self._normalize_role_gear_store(settings.get("role_gear_store", {}))
-        saved_role_name = str(settings.get("current_role_name", ROLE_CHARACTER_NAMES[0]))
-        self.current_role_name = saved_role_name if saved_role_name in ROLE_CHARACTER_NAMES else ROLE_CHARACTER_NAMES[0]
+        if not self.role_gear_store:
+            self.role_gear_store = {DEFAULT_ROLE_NAME: self._empty_role_entry()}
+        saved_role_name = str(settings.get("current_role_name", "")).strip()
+        self.current_role_name = saved_role_name if saved_role_name in self.role_gear_store else next(iter(self.role_gear_store))
         self._role_gear_loading = False
 
         self._build_ui()
@@ -701,6 +726,7 @@ class MainWindow(QMainWindow):
             "current_category": self.current_category,
             "threshold": models.parse_float(self.threshold_edit.text(), "")[0],
             "current_role_name": self.current_role_name,
+            "role_stat_names": self.role_stat_names,
             "role_gear_store": self.role_gear_store,
         }
         if hasattr(self, "crit_atlas_edit"):
@@ -711,19 +737,18 @@ class MainWindow(QMainWindow):
             json.dump(data, f, ensure_ascii=False, indent=2)
 
     def _empty_role_gear_rows(self) -> list[list[str]]:
-        return [["", "", "", "", "", "", ""] for _ in ROLE_GEAR_SLOTS]
+        return [["" for _ in range(len(self.role_stat_names))] for _ in ROLE_GEAR_SLOTS]
 
     def _empty_role_stat_caps(self) -> dict[str, str]:
-        return {stat: "" for stat in ROLE_GEAR_STATS}
+        return {stat: "" for stat in self.role_stat_names if stat in ROLE_TARGET_STATS}
 
     def _default_role_profile(self) -> dict[str, str]:
         return {
+            "role_class": "berserker",
             "mode": "melee",
             "crit_quality_key": "orange",
             "dodge_quality_key": "orange",
             "pet_bonus": "0.0",
-            "crit_rune": "",
-            "dodge_rune": "",
             "crit_atlas": self.saved_crit_atlas,
             "dodge_atlas": self.saved_dodge_atlas,
             "crit_self_full": "8",
@@ -733,8 +758,7 @@ class MainWindow(QMainWindow):
             "dodge_mystic": "10",
             "as_base": "",
             "as_trait_factor": "1",
-            "as_guild_bonus": "0",
-            "as_rune_bonus": "",
+            "as_guild_bonus": "5",
             "as_mystic_bonus": "10",
             "as_personality_bonus": "7.0",
             "as_pet_bonus": "0.0",
@@ -742,27 +766,31 @@ class MainWindow(QMainWindow):
             "as_panel_actual": "",
         }
 
-    def _normalize_role_gear_store(self, raw: object) -> dict[str, dict[str, object]]:
-        normalized: dict[str, dict[str, object]] = {
-            role_name: {
-                "gear_rows": self._empty_role_gear_rows(),
-                "stat_caps": self._empty_role_stat_caps(),
-                "role_profile": self._default_role_profile(),
-            }
-            for role_name in ROLE_CHARACTER_NAMES
+    def _empty_role_entry(self) -> dict[str, object]:
+        return {
+            "gear_rows": self._empty_role_gear_rows(),
+            "stat_caps": self._empty_role_stat_caps(),
+            "role_profile": self._default_role_profile(),
         }
+
+    def _normalize_role_gear_store(self, raw: object) -> dict[str, dict[str, object]]:
+        normalized: dict[str, dict[str, object]] = {}
         if not isinstance(raw, dict):
             return normalized
 
-        for role_name in ROLE_CHARACTER_NAMES:
-            role_entry = raw.get(role_name)
+        for raw_role_name, role_entry in raw.items():
+            role_name = str(raw_role_name).strip()
+            if not role_name:
+                continue
+            normalized[role_name] = self._empty_role_entry()
             if isinstance(role_entry, list):
                 for row_idx in range(min(len(ROLE_GEAR_SLOTS), len(role_entry))):
                     row_values = role_entry[row_idx]
                     if not isinstance(row_values, list):
                         continue
-                    for col_idx in range(min(4, len(row_values))):
-                        normalized[role_name]["gear_rows"][row_idx][col_idx] = str(row_values[col_idx]).strip()
+                    stat_values = row_values[1:1 + len(self.role_stat_names)] if len(row_values) >= len(self.role_stat_names) + 2 else row_values[:len(self.role_stat_names)]
+                    for col_idx in range(min(len(self.role_stat_names), len(stat_values))):
+                        normalized[role_name]["gear_rows"][row_idx][col_idx] = str(stat_values[col_idx]).strip()
                 continue
 
             if not isinstance(role_entry, dict):
@@ -774,12 +802,15 @@ class MainWindow(QMainWindow):
                     row_values = role_rows[row_idx]
                     if not isinstance(row_values, list):
                         continue
-                    for col_idx in range(min(7, len(row_values))):
-                        normalized[role_name]["gear_rows"][row_idx][col_idx] = str(row_values[col_idx]).strip()
+                    stat_values = row_values[1:1 + len(self.role_stat_names)] if len(row_values) >= len(self.role_stat_names) + 2 else row_values[:len(self.role_stat_names)]
+                    for col_idx in range(min(len(self.role_stat_names), len(stat_values))):
+                        normalized[role_name]["gear_rows"][row_idx][col_idx] = str(stat_values[col_idx]).strip()
 
             role_caps = role_entry.get("stat_caps")
             if isinstance(role_caps, dict):
-                for stat in ROLE_GEAR_STATS:
+                for stat in self.role_stat_names:
+                    if stat not in ROLE_TARGET_STATS:
+                        continue
                     normalized[role_name]["stat_caps"][stat] = str(role_caps.get(stat, "")).strip()
 
             role_profile = role_entry.get("role_profile")
@@ -789,10 +820,249 @@ class MainWindow(QMainWindow):
                     role_profile.setdefault("dodge_quality_key", role_profile.get("quality_key", "orange"))
                 if "crit_pet_bonus" in role_profile:
                     role_profile.setdefault("pet_bonus", role_profile.get("crit_pet_bonus", "0.0"))
+                rune_row_idx = ROLE_GEAR_SLOTS.index("符文")
+                rune_row = normalized[role_name]["gear_rows"][rune_row_idx]
+                if len(rune_row) >= len(self.role_stat_names) + 2:
+                    stat_to_legacy_value = {
+                        DEFAULT_ROLE_GEAR_STATS[0]: role_profile.get("as_rune_bonus", ""),
+                        DEFAULT_ROLE_GEAR_STATS[1]: role_profile.get("crit_rune", ""),
+                        DEFAULT_ROLE_GEAR_STATS[4]: role_profile.get("dodge_rune", ""),
+                    }
+                    for stat_idx, stat in enumerate(self.role_stat_names, start=1):
+                        legacy_value = str(stat_to_legacy_value.get(stat, "")).strip()
+                        if legacy_value and rune_row[stat_idx] == "":
+                            rune_row[stat_idx] = legacy_value
                 for key in normalized[role_name]["role_profile"].keys():
                     normalized[role_name]["role_profile"][key] = str(role_profile.get(key, normalized[role_name]["role_profile"][key])).strip()
         return normalized
 
+    def _sync_role_selector(self) -> None:
+        if not hasattr(self, "role_select_combo"):
+            return
+        self.role_select_combo.blockSignals(True)
+        self.role_select_combo.clear()
+        for role_name in self.role_gear_store.keys():
+            self.role_select_combo.addItem(role_name, role_name)
+        if self.current_role_name and self.current_role_name in self.role_gear_store:
+            self.role_select_combo.setCurrentText(self.current_role_name)
+        self.role_select_combo.blockSignals(False)
+
+    def _load_current_role_into_editor(self) -> None:
+        if hasattr(self, "role_name_edit"):
+            self.role_name_edit.setText(self.current_role_name)
+        self._load_role_gear_to_table(self.current_role_name)
+        self._load_role_caps(self.current_role_name)
+        self._load_role_profile(self.current_role_name)
+        self._refresh_role_stat_overview()
+
+    def _role_table_headers(self) -> list[str]:
+        return ["部位", "当前装备", *self.role_stat_names, "备注"]
+
+    def _legacy_role_table_headers(self) -> list[str]:
+        return ["部位", *self.role_stat_names]
+
+    def _role_target_row_index(self) -> int:
+        return len(ROLE_GEAR_SLOTS)
+
+    def _role_current_row_index(self) -> int:
+        return len(ROLE_GEAR_SLOTS) + 1
+
+    def _role_table_headers(self) -> list[str]:
+        return ["部位", *self.role_stat_names]
+
+    def _apply_role_stat_table_headers(self) -> None:
+        if not hasattr(self, "role_stat_table"):
+            return
+        headers = self._role_table_headers()
+        self.role_stat_table.setColumnCount(len(headers))
+        self.role_stat_table.setHorizontalHeaderLabels(headers)
+        header = self.role_stat_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        for col_idx in range(1, len(headers)):
+            header.setSectionResizeMode(col_idx, QHeaderView.Fixed)
+            self.role_stat_table.setColumnWidth(col_idx, 74)
+        if len(headers) > 1:
+            header.setSectionResizeMode(len(headers) - 1, QHeaderView.Stretch)
+
+    def _style_role_summary_rows(self) -> None:
+        if not hasattr(self, "role_stat_table"):
+            return
+        target_brush = QColor("#eff6ff")
+        current_brush = QColor("#f8fafc")
+        for row_idx, brush in [
+            (self._role_target_row_index(), target_brush),
+            (self._role_current_row_index(), current_brush),
+        ]:
+            for col_idx in range(self.role_stat_table.columnCount()):
+                item = self.role_stat_table.item(row_idx, col_idx)
+                if item is not None:
+                    item.setBackground(brush)
+
+    def _rebuild_role_stat_caps_ui(self) -> None:
+        if not hasattr(self, "role_cap_row_layout"):
+            return
+        while self.role_cap_row_layout.count():
+            item = self.role_cap_row_layout.takeAt(0)
+            widget = item.widget()
+            layout = item.layout()
+            if widget:
+                widget.deleteLater()
+            if layout:
+                while layout.count():
+                    child = layout.takeAt(0)
+                    child_widget = child.widget()
+                    if child_widget:
+                        child_widget.deleteLater()
+        self.role_current_value_edits = {}
+        self.role_cap_edits = {}
+        target_row = QHBoxLayout()
+        target_row.setSpacing(8)
+        current_row = QHBoxLayout()
+        current_row.setSpacing(8)
+        for stat in self.role_stat_names:
+            if stat not in ROLE_TARGET_STATS:
+                continue
+            current_label = QLabel(f"{stat}当前", self.role_cap_row_widget)
+            current_edit = QLineEdit(self.role_cap_row_widget)
+            current_edit.setReadOnly(True)
+            current_edit.setPlaceholderText("-")
+            current_edit.setFixedWidth(100)
+            self.role_current_value_edits[stat] = current_edit
+            current_row.addWidget(current_label)
+            current_row.addWidget(current_edit)
+
+            target_label = QLabel(f"{stat}目标", self.role_cap_row_widget)
+            target_edit = QLineEdit(self.role_cap_row_widget)
+            target_edit.setPlaceholderText("-")
+            target_edit.setFixedWidth(100)
+            target_edit.editingFinished.connect(self._on_role_cap_changed)
+            self.role_cap_edits[stat] = target_edit
+            target_row.addWidget(target_label)
+            target_row.addWidget(target_edit)
+        target_row.addStretch()
+        current_row.addStretch()
+        self.role_cap_row_layout.addLayout(target_row)
+        self.role_cap_row_layout.addLayout(current_row)
+
+    def _safe_float(self, value: object, default: float = 0.0) -> float:
+        try:
+            text = str(value).strip()
+            if text == "":
+                return default
+            return float(text)
+        except Exception:
+            return default
+
+    def _calculate_role_attack_speed(self, stat_totals: dict[str, float]) -> float | None:
+        if not hasattr(self, "role_profile_edits"):
+            return None
+        base = self._safe_float(self.role_profile_edits["as_base"].text(), 0.0)
+        if base <= 0:
+            return None
+        trait_factor = self._safe_float(self.role_profile_edits["as_trait_factor"].text(), 1.0)
+        if trait_factor <= 0:
+            trait_factor = 1.0
+        equip_bonus = stat_totals.get("攻速", 0.0)
+        mystic_bonus = self._safe_float(self.role_profile_edits["as_mystic_bonus"].text(), 10.0)
+        guild_bonus = self._safe_float(self.role_profile_edits["as_guild_bonus"].text(), 0.0)
+        equip_bonus = stat_totals.get(DEFAULT_ROLE_GEAR_STATS[0], equip_bonus)
+        pet_bonus = float(self.role_profile_as_pet_combo.currentData()) if hasattr(self, "role_profile_as_pet_combo") else 0.0
+        personality_bonus = float(self.role_profile_personality_combo.currentData()) if hasattr(self, "role_profile_personality_combo") else 0.0
+        hunter_quality_bonus = float(self.role_profile_hunter_quality_combo.currentData()) if hasattr(self, "role_profile_hunter_quality_combo") else 0.0
+        total_bonus_ratio = (
+            equip_bonus
+            + mystic_bonus
+            + guild_bonus
+            + pet_bonus
+            + personality_bonus
+            + hunter_quality_bonus
+        ) / 100.0
+        return max((1.0 - total_bonus_ratio) * base / trait_factor, ATTACK_SPEED_FLOOR)
+
+    def _collect_role_table_rows(self) -> list[list[str]]:
+        rows: list[list[str]] = []
+        if not hasattr(self, "role_stat_table"):
+            return rows
+        for row_idx in range(len(ROLE_GEAR_SLOTS)):
+            row_values: list[str] = []
+            for col_idx in range(1, len(self.role_stat_names) + 1):
+                item = self.role_stat_table.item(row_idx, col_idx)
+                row_values.append("" if item is None else item.text().strip())
+            rows.append(row_values)
+        return rows
+
+    def _read_role_caps_from_table(self) -> dict[str, str]:
+        caps: dict[str, str] = {}
+        if not hasattr(self, "role_stat_table"):
+            return caps
+        row_idx = self._role_target_row_index()
+        for stat_idx, stat in enumerate(self.role_stat_names, start=1):
+            if stat not in ROLE_TARGET_STATS:
+                continue
+            item = self.role_stat_table.item(row_idx, stat_idx)
+            caps[stat] = "" if item is None else item.text().strip()
+        return caps
+
+    def _add_role_stat_column(self) -> None:
+        stat_name, ok = QInputDialog.getText(self, "添加数值列", "请输入新数值列名称:")
+        stat_name = stat_name.strip()
+        if not ok or not stat_name:
+            return
+        if stat_name in self.role_stat_names:
+            QMessageBox.information(self, "提示", "该数值列已存在。")
+            return
+        self.role_stat_names.append(stat_name)
+        for role_entry in self.role_gear_store.values():
+            gear_rows = role_entry.get("gear_rows")
+            if isinstance(gear_rows, list):
+                for row_values in gear_rows:
+                    if isinstance(row_values, list):
+                        insert_at = max(len(row_values) - 1, 1)
+                        row_values.insert(insert_at, "")
+            stat_caps = role_entry.get("stat_caps")
+            if isinstance(stat_caps, dict):
+                if stat_name in ROLE_TARGET_STATS:
+                    stat_caps.setdefault(stat_name, "")
+        self._rebuild_role_stat_caps_ui()
+        self._apply_role_stat_table_headers()
+        self._load_current_role_into_editor()
+        self._save_settings()
+
+    def _remove_role_stat_column(self) -> None:
+        if len(self.role_stat_names) <= 1:
+            QMessageBox.information(self, "提示", "至少保留一个数值列。")
+            return
+        stat_name, ok = QInputDialog.getItem(
+            self,
+            "删除数值列",
+            "请选择要删除的数值列:",
+            self.role_stat_names,
+            0,
+            False,
+        )
+        stat_name = str(stat_name).strip()
+        if not ok or not stat_name:
+            return
+        if stat_name not in self.role_stat_names:
+            return
+
+        stat_index = self.role_stat_names.index(stat_name)
+        self.role_stat_names.pop(stat_index)
+        for role_entry in self.role_gear_store.values():
+            gear_rows = role_entry.get("gear_rows")
+            if isinstance(gear_rows, list):
+                for row_values in gear_rows:
+                    if isinstance(row_values, list):
+                        remove_at = 1 + stat_index
+                        if 0 <= remove_at < len(row_values):
+                            row_values.pop(remove_at)
+            stat_caps = role_entry.get("stat_caps")
+            if isinstance(stat_caps, dict):
+                stat_caps.pop(stat_name, None)
+        self._rebuild_role_stat_caps_ui()
+        self._apply_role_stat_table_headers()
+        self._load_current_role_into_editor()
+        self._save_settings()
     def _build_ui(self) -> None:
         root = QWidget(self)
         root.setObjectName("RootContainer")
@@ -1156,6 +1426,7 @@ class MainWindow(QMainWindow):
 
         crit_card = QFrame(cap_card)
         crit_card.setObjectName("CardFrame")
+        crit_card.setMinimumHeight(190)
         crit_layout = QVBoxLayout(crit_card)
         crit_layout.setContentsMargins(10, 10, 10, 10)
         crit_layout.setSpacing(8)
@@ -1229,10 +1500,10 @@ class MainWindow(QMainWindow):
         btn_crit_cap.clicked.connect(self.check_crit_cap)
         crit_action_row.addWidget(btn_crit_cap)
         crit_layout.addLayout(crit_action_row)
-        cap_layout.addWidget(crit_card)
 
         dodge_card = QFrame(cap_card)
         dodge_card.setObjectName("CardFrame")
+        dodge_card.setMinimumHeight(190)
         dodge_layout = QVBoxLayout(dodge_card)
         dodge_layout.setContentsMargins(10, 10, 10, 10)
         dodge_layout.setSpacing(8)
@@ -1306,7 +1577,12 @@ class MainWindow(QMainWindow):
         btn_dodge_cap.clicked.connect(self.check_dodge_cap)
         dodge_action_row.addWidget(btn_dodge_cap)
         dodge_layout.addLayout(dodge_action_row)
-        cap_layout.addWidget(dodge_card)
+
+        cap_panels_row = QHBoxLayout()
+        cap_panels_row.setSpacing(12)
+        cap_panels_row.addWidget(crit_card, 1)
+        cap_panels_row.addWidget(dodge_card, 1)
+        cap_layout.addLayout(cap_panels_row)
 
         self.cap_hint_label = QLabel(
             "说明: 参考“看闪避暴击满不满.xlsx”：先对装备+符文封顶；暴击叠加品质/宠物装备/图鉴/自身满/公会/秘法，闪避叠加品质/图鉴/自身满/公会/秘法；按固定目标暴击 50、闪避 40 判定。",
@@ -1338,12 +1614,11 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         row.addWidget(QLabel("职业", recommend_card))
         self.recommend_role_combo = QComboBox(recommend_card)
-        self.recommend_role_combo.addItem("通用", "common")
         self.recommend_role_combo.addItem("狂战士", "berserker")
         self.recommend_role_combo.addItem("圣骑士", "paladin")
         self.recommend_role_combo.addItem("射手", "archer")
         self.recommend_role_combo.addItem("法师", "mage")
-        self.recommend_role_combo.addItem("猎人", "hunter")
+        self.recommend_role_combo.addItem("魔枪士", "hunter")
         row.addWidget(self.recommend_role_combo)
         row.addSpacing(8)
         row.addWidget(QLabel("目标玩法", recommend_card))
@@ -1688,7 +1963,7 @@ class MainWindow(QMainWindow):
 
         title = QLabel("角色装备", panel)
         title.setObjectName("IntroTitle")
-        desc = QLabel("独立页面：维护 22 个角色的装备统计，并预留历史装备自动配对流程。", panel)
+        desc = QLabel("按角色保存装备数据，并预留历史装备自动配对流程。", panel)
         desc.setObjectName("IntroSub")
         layout.addWidget(title)
         layout.addWidget(desc)
@@ -1700,39 +1975,43 @@ class MainWindow(QMainWindow):
         role_layout.setSpacing(8)
 
         ctrl_row = QHBoxLayout()
-        ctrl_row.addWidget(QLabel("角色", role_card))
+        ctrl_row.addWidget(QLabel("已保存角色", role_card))
         self.role_select_combo = QComboBox(role_card)
-        for role_name in ROLE_CHARACTER_NAMES:
-            self.role_select_combo.addItem(role_name, role_name)
-        self.role_select_combo.setCurrentText(self.current_role_name)
+        self.role_select_combo.setMinimumWidth(180)
         self.role_select_combo.currentIndexChanged.connect(self._on_role_changed)
         ctrl_row.addWidget(self.role_select_combo)
         ctrl_row.addSpacing(8)
+        self.role_name_edit = QLineEdit(role_card)
+        self.role_name_edit.setPlaceholderText("输入角色名，保存后加入列表")
+        self.role_name_edit.setFixedWidth(220)
+        ctrl_row.addWidget(self.role_name_edit)
+        ctrl_row.addWidget(QLabel("职业", role_card))
+        self.role_profile_class_combo = QComboBox(role_card)
+        self.role_profile_class_combo.addItem("狂战士", "berserker")
+        self.role_profile_class_combo.addItem("圣骑士", "paladin")
+        self.role_profile_class_combo.addItem("射手", "archer")
+        self.role_profile_class_combo.addItem("法师", "mage")
+        self.role_profile_class_combo.addItem("魔枪士", "hunter")
+        self.role_profile_class_combo.currentIndexChanged.connect(self._on_role_profile_changed)
+        ctrl_row.addWidget(self.role_profile_class_combo)
+        btn_new_role = QPushButton("新增角色", role_card)
+        btn_new_role.setObjectName("GhostButton")
+        btn_new_role.clicked.connect(self._start_new_role)
+        ctrl_row.addWidget(btn_new_role)
+        btn_save_role = QPushButton("保存角色", role_card)
+        btn_save_role.setObjectName("PrimaryButton")
+        btn_save_role.clicked.connect(self._save_role_from_editor)
+        ctrl_row.addWidget(btn_save_role)
         btn_clear_role = QPushButton("清空当前角色", role_card)
         btn_clear_role.setObjectName("GhostButton")
         btn_clear_role.clicked.connect(self._clear_current_role_gear)
         ctrl_row.addWidget(btn_clear_role)
+        btn_delete_role = QPushButton("删除角色", role_card)
+        btn_delete_role.setObjectName("DangerButton")
+        btn_delete_role.clicked.connect(self._delete_current_role)
+        ctrl_row.addWidget(btn_delete_role)
         ctrl_row.addStretch()
         role_layout.addLayout(ctrl_row)
-
-        match_row = QHBoxLayout()
-        match_row.addWidget(QLabel("配对模式", role_card))
-        self.match_mode_combo = QComboBox(role_card)
-        self.match_mode_combo.addItem("单部位匹配（占位）", "single")
-        self.match_mode_combo.addItem("整套匹配（占位）", "set")
-        match_row.addWidget(self.match_mode_combo)
-        match_row.addSpacing(8)
-        match_row.addWidget(QLabel("目标优先", role_card))
-        self.match_goal_combo = QComboBox(role_card)
-        self.match_goal_combo.addItem("达标优先（占位）", "threshold")
-        self.match_goal_combo.addItem("总分优先（占位）", "score")
-        match_row.addWidget(self.match_goal_combo)
-        match_row.addStretch()
-        btn_match_placeholder = QPushButton("开始历史配对（占位）", role_card)
-        btn_match_placeholder.setObjectName("PrimaryButton")
-        btn_match_placeholder.clicked.connect(self.run_match_placeholder)
-        match_row.addWidget(btn_match_placeholder)
-        role_layout.addLayout(match_row)
 
         profile_card = QFrame(role_card)
         profile_card.setObjectName("CardFrame")
@@ -1799,14 +2078,11 @@ class MainWindow(QMainWindow):
 
         self.role_profile_edits: dict[str, QLineEdit] = {}
         profile_fields = [
-            ("as_base", "\u6b66\u5668\u653b\u901f\u503c", 2, 2),
-            ("as_trait_factor", "\u7279\u6027\u7cfb\u6570", 2, 4),
-            ("as_guild_bonus", "\u653b\u901f\u516c\u4f1a(%)", 3, 0),
-            ("as_rune_bonus", "\u653b\u901f\u7b26\u6587(%)", 3, 2),
-            ("as_mystic_bonus", "\u653b\u901f\u79d8\u6cd5(%)", 3, 4),
-            ("as_panel_actual", "\u5b9e\u6d4b\u653b\u901f", 4, 0),
-            ("crit_rune", "\u66b4\u51fb\u7b26\u6587", 4, 2),
-            ("dodge_rune", "\u95ea\u907f\u7b26\u6587", 4, 4),
+            ("as_base", "\u6b66\u5668\u653b\u901f\u503c", 3, 0),
+            ("as_trait_factor", "\u7279\u6027\u7cfb\u6570", 3, 2),
+            ("as_guild_bonus", "\u653b\u901f\u516c\u4f1a(%)", 3, 4),
+            ("as_mystic_bonus", "\u653b\u901f\u79d8\u6cd5(%)", 4, 0),
+            ("as_panel_actual", "\u5b9e\u6d4b\u653b\u901f", 4, 2),
             ("crit_atlas", "\u56fe\u9274\u66b4\u51fb", 5, 0),
             ("dodge_atlas", "\u56fe\u9274\u95ea\u907f", 5, 2),
             ("crit_guild", "\u66b4\u51fb\u516c\u4f1a", 5, 4),
@@ -1828,118 +2104,160 @@ class MainWindow(QMainWindow):
         profile_layout.addWidget(self.role_profile_hint_label)
         role_layout.addWidget(profile_card)
 
-        self.role_stat_summary_label = QLabel("统计进度: 0/8 个部位已填写。", role_card)
-        self.role_stat_summary_label.setObjectName("IntroItem")
-        role_layout.addWidget(self.role_stat_summary_label)
+        detail_card = QFrame(role_card)
+        detail_card.setObjectName("CardFrame")
+        detail_layout = QVBoxLayout(detail_card)
+        detail_layout.setContentsMargins(10, 10, 10, 10)
+        detail_layout.setSpacing(8)
 
-        cap_row = QGridLayout()
-        cap_row.setHorizontalSpacing(10)
-        cap_row.setVerticalSpacing(8)
-        self.role_cap_edits: dict[str, QLineEdit] = {}
-        for idx, stat in enumerate(ROLE_GEAR_STATS):
-            label = QLabel(f"{stat}最大值", role_card)
-            edit = QLineEdit(role_card)
-            edit.setPlaceholderText("不填则不比较")
-            edit.setFixedWidth(140)
-            edit.editingFinished.connect(self._on_role_cap_changed)
-            self.role_cap_edits[stat] = edit
-            row = idx // 3
-            col = (idx % 3) * 2
-            cap_row.addWidget(label, row, col)
-            cap_row.addWidget(edit, row, col + 1)
-        btn_refresh_role = QPushButton("刷新角色统计", role_card)
-        btn_refresh_role.setObjectName("PrimaryButton")
-        btn_refresh_role.clicked.connect(self._refresh_role_stat_overview)
-        cap_row.addWidget(btn_refresh_role, 1, 4)
-        role_layout.addLayout(cap_row)
-        self.role_summary_table = QTableWidget(len(ROLE_GEAR_STATS), 5, role_card)
-        self.role_summary_table.setHorizontalHeaderLabels(["\u5c5e\u6027", "\u5f53\u524d\u603b\u503c", "\u6700\u5927\u503c", "\u8fbe\u6210\u5ea6", "\u72b6\u6001"])
-        self.role_summary_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.role_summary_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.role_summary_table.verticalHeader().setVisible(False)
-        self.role_summary_table.verticalHeader().setDefaultSectionSize(32)
-        self.role_summary_table.setAlternatingRowColors(True)
-        self.role_summary_table.setWordWrap(False)
-        self.role_summary_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.role_summary_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        for row_idx, stat in enumerate(ROLE_GEAR_STATS):
-            for col_idx, value in enumerate([stat, "0", "-", "-", "\u672a\u8bbe\u7f6e\u6700\u5927\u503c"]):
-                item = QTableWidgetItem(value)
-                item.setTextAlignment(Qt.AlignCenter)
-                self.role_summary_table.setItem(row_idx, col_idx, item)
-        self.role_summary_table.resizeColumnsToContents()
-        summary_height = self.role_summary_table.horizontalHeader().height() + self.role_summary_table.rowCount() * self.role_summary_table.verticalHeader().defaultSectionSize() + 8
-        self.role_summary_table.setMinimumHeight(summary_height)
-        self.role_summary_table.setMaximumHeight(summary_height + 4)
-        role_layout.addWidget(self.role_summary_table)
+        stat_toolbar = QHBoxLayout()
+        btn_add_role_stat = QPushButton("添加数值列", detail_card)
+        btn_add_role_stat.setObjectName("GhostButton")
+        btn_add_role_stat.clicked.connect(self._add_role_stat_column)
+        stat_toolbar.addWidget(btn_add_role_stat)
+        btn_remove_role_stat = QPushButton("删除数值列", detail_card)
+        btn_remove_role_stat.setObjectName("DangerButton")
+        btn_remove_role_stat.clicked.connect(self._remove_role_stat_column)
+        stat_toolbar.addWidget(btn_remove_role_stat)
+        stat_toolbar.addStretch()
+        detail_layout.addLayout(stat_toolbar)
 
-        self.role_stat_table = QTableWidget(len(ROLE_GEAR_SLOTS), 8, role_card)
-        self.role_stat_table.setHorizontalHeaderLabels(["\u90e8\u4f4d", "\u5f53\u524d\u88c5\u5907", "\u653b\u901f", "\u66b4\u51fb", "\u66b4\u51fb\u4f24\u5bb3", "\u51cf\u4f24", "\u95ea\u907f", "\u5907\u6ce8"])
+        self.role_cap_row_widget = QWidget(detail_card)
+        self.role_cap_row_layout = QVBoxLayout(self.role_cap_row_widget)
+        self.role_cap_row_layout.setContentsMargins(0, 0, 0, 0)
+        self.role_cap_row_layout.setSpacing(6)
+
+        self.role_stat_table = QTableWidget(len(ROLE_GEAR_SLOTS) + 2, len(self.role_stat_names) + 1, detail_card)
         self.role_stat_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.role_stat_table.verticalHeader().setVisible(False)
         self.role_stat_table.verticalHeader().setDefaultSectionSize(34)
         self.role_stat_table.setAlternatingRowColors(True)
         self.role_stat_table.setWordWrap(False)
         self.role_stat_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.role_stat_table.horizontalHeader().setStretchLastSection(True)
         self.role_stat_table.blockSignals(True)
         for row_idx, slot in enumerate(ROLE_GEAR_SLOTS):
             slot_item = QTableWidgetItem(slot)
             slot_item.setFlags(slot_item.flags() & ~Qt.ItemIsEditable)
             slot_item.setTextAlignment(Qt.AlignCenter)
             self.role_stat_table.setItem(row_idx, 0, slot_item)
-            for col_idx in range(1, 8):
+            for col_idx in range(1, len(self.role_stat_names) + 1):
                 item = QTableWidgetItem("")
-                item.setTextAlignment(Qt.AlignCenter if col_idx < 7 else Qt.AlignLeft | Qt.AlignVCenter)
+                item.setTextAlignment(Qt.AlignCenter)
                 self.role_stat_table.setItem(row_idx, col_idx, item)
+        for summary_row, label in [
+            (self._role_target_row_index(), ROLE_TARGET_SUMMARY_LABEL),
+            (self._role_current_row_index(), ROLE_CURRENT_SUMMARY_LABEL),
+        ]:
+            label_item = QTableWidgetItem(label)
+            label_item.setFlags(label_item.flags() & ~Qt.ItemIsEditable)
+            label_item.setTextAlignment(Qt.AlignCenter)
+            self.role_stat_table.setItem(summary_row, 0, label_item)
+            for col_idx in range(1, len(self.role_stat_names) + 1):
+                item = QTableWidgetItem("")
+                if summary_row == self._role_current_row_index():
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                item.setTextAlignment(Qt.AlignCenter)
+                self.role_stat_table.setItem(summary_row, col_idx, item)
         self.role_stat_table.blockSignals(False)
         self.role_stat_table.itemChanged.connect(self._on_role_stat_table_changed)
-        self.role_stat_table.resizeColumnsToContents()
-        stat_height = self.role_stat_table.horizontalHeader().height() + self.role_stat_table.rowCount() * self.role_stat_table.verticalHeader().defaultSectionSize() + 8
-        self.role_stat_table.setMinimumHeight(stat_height)
-        role_layout.addWidget(self.role_stat_table)
-        self.match_placeholder_label = QLabel("状态: 未开始。点击“开始历史配对（占位）”生成占位结果。", role_card)
-        self.match_placeholder_label.setObjectName("IntroItem")
-        role_layout.addWidget(self.match_placeholder_label)
+        self._rebuild_role_stat_caps_ui()
+        self._apply_role_stat_table_headers()
+        self._style_role_summary_rows()
+        detail_layout.addWidget(self.role_stat_table, 1)
 
-        self.match_preview_table = QTableWidget(0, 4, role_card)
-        self.match_preview_table.setHorizontalHeaderLabels(["部位", "当前装备", "候选装备", "说明"])
-        self.match_preview_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.match_preview_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.match_preview_table.verticalHeader().setVisible(False)
-        self.match_preview_table.verticalHeader().setDefaultSectionSize(34)
-        role_layout.addWidget(self.match_preview_table)
+        self.role_cap_row_widget.setVisible(False)
+
+        self.role_stat_summary_label = QLabel("", detail_card)
+        self.role_stat_summary_label.setObjectName("IntroItem")
+        self.role_stat_summary_label.setVisible(False)
+        detail_layout.addWidget(self.role_stat_summary_label)
+
+        role_layout.addWidget(detail_card, 1)
 
         layout.addWidget(role_card, 1)
-        self._load_role_gear_to_table(self.current_role_name)
-        self._load_role_caps(self.current_role_name)
-        self._load_role_profile(self.current_role_name)
-        self._refresh_role_stat_overview()
+        self._sync_role_selector()
+        self._load_current_role_into_editor()
 
     def _on_role_changed(self, _index: int) -> None:
         if not hasattr(self, "role_select_combo"):
             return
         selected_role = str(self.role_select_combo.currentData())
+        self._switch_role(selected_role)
+
+    def _switch_role(self, selected_role: str) -> None:
         if not selected_role or selected_role == self.current_role_name:
             return
-        self._save_current_role_gear()
-        self._save_current_role_caps()
-        self._save_current_role_profile()
         self.current_role_name = selected_role
-        self._load_role_gear_to_table(self.current_role_name)
-        self._load_role_caps(self.current_role_name)
-        self._load_role_profile(self.current_role_name)
-        self._refresh_role_stat_overview()
-        if hasattr(self, "match_placeholder_label"):
-            self.match_placeholder_label.setText("状态: 未开始。点击“开始历史配对（占位）”生成占位结果。")
-        if hasattr(self, "match_preview_table"):
-            self.match_preview_table.setRowCount(0)
+        self._sync_role_selector()
+        self._load_current_role_into_editor()
         self._save_settings()
 
     def _on_role_stat_table_changed(self, _item: QTableWidgetItem) -> None:
         if self._role_gear_loading:
             return
         self._save_current_role_gear()
+        self._save_current_role_caps()
         self._refresh_role_stat_overview()
+        self._save_settings()
+
+    def _start_new_role(self) -> None:
+        self.current_role_name = ""
+        if hasattr(self, "role_select_combo"):
+            self.role_select_combo.blockSignals(True)
+            self.role_select_combo.setCurrentIndex(-1)
+            self.role_select_combo.blockSignals(False)
+        if hasattr(self, "role_name_edit"):
+            self.role_name_edit.clear()
+            self.role_name_edit.setFocus()
+        self._load_current_role_into_editor()
+
+    def _save_role_from_editor(self) -> None:
+        if not hasattr(self, "role_name_edit"):
+            return
+        role_name = self.role_name_edit.text().strip()
+        if not role_name:
+            QMessageBox.information(self, "提示", "请先输入角色名称。")
+            return
+        role_entry = self.role_gear_store.setdefault(role_name, self._empty_role_entry())
+        role_entry["gear_rows"] = self._collect_role_table_rows()
+        profile = self._default_role_profile()
+        profile["role_class"] = str(self.role_profile_class_combo.currentData())
+        profile["mode"] = str(self.role_profile_mode_combo.currentData())
+        profile["crit_quality_key"] = str(self.role_profile_crit_quality_combo.currentData())
+        profile["dodge_quality_key"] = str(self.role_profile_dodge_quality_combo.currentData())
+        profile["pet_bonus"] = str(self.role_profile_crit_pet_combo.currentData())
+        profile["as_pet_bonus"] = str(self.role_profile_as_pet_combo.currentData())
+        profile["as_personality_bonus"] = str(self.role_profile_personality_combo.currentData())
+        profile["as_hunter_quality_bonus"] = str(self.role_profile_hunter_quality_combo.currentData())
+        for key, edit in self.role_profile_edits.items():
+            profile[key] = edit.text().strip()
+        role_entry["role_profile"] = profile
+        self.current_role_name = role_name
+        self._sync_role_selector()
+        self._save_settings()
+
+    def _delete_current_role(self) -> None:
+        if not self.current_role_name or self.current_role_name not in self.role_gear_store:
+            QMessageBox.information(self, "提示", "请先选择一个角色。")
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "删除角色",
+            f"确定删除角色“{self.current_role_name}”吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        self.role_gear_store.pop(self.current_role_name, None)
+        if not self.role_gear_store:
+            self.role_gear_store = {DEFAULT_ROLE_NAME: self._empty_role_entry()}
+        self.current_role_name = next(iter(self.role_gear_store))
+        self._sync_role_selector()
+        self._load_current_role_into_editor()
         self._save_settings()
 
     def _refresh_role_quality_combo_labels(self) -> None:
@@ -1987,38 +2305,24 @@ class MainWindow(QMainWindow):
         self._save_settings()
 
     def _save_current_role_gear(self) -> None:
-        if not hasattr(self, "role_stat_table"):
+        if not hasattr(self, "role_stat_table") or not self.current_role_name:
             return
-        rows: list[list[str]] = []
-        for row_idx in range(len(ROLE_GEAR_SLOTS)):
-            row_values: list[str] = []
-            for col_idx in range(1, 8):
-                item = self.role_stat_table.item(row_idx, col_idx)
-                row_values.append("" if item is None else item.text().strip())
-            rows.append(row_values)
-        role_entry = self.role_gear_store.setdefault(
-            self.current_role_name,
-            {"gear_rows": self._empty_role_gear_rows(), "stat_caps": self._empty_role_stat_caps(), "role_profile": self._default_role_profile()},
-        )
+        rows = self._collect_role_table_rows()
+        role_entry = self.role_gear_store.setdefault(self.current_role_name, self._empty_role_entry())
         role_entry["gear_rows"] = rows
 
     def _save_current_role_caps(self) -> None:
-        if not hasattr(self, "role_cap_edits"):
+        if not self.current_role_name:
             return
-        role_entry = self.role_gear_store.setdefault(
-            self.current_role_name,
-            {"gear_rows": self._empty_role_gear_rows(), "stat_caps": self._empty_role_stat_caps(), "role_profile": self._default_role_profile()},
-        )
-        role_entry["stat_caps"] = {stat: edit.text().strip() for stat, edit in self.role_cap_edits.items()}
+        role_entry = self.role_gear_store.setdefault(self.current_role_name, self._empty_role_entry())
+        role_entry["stat_caps"] = self._read_role_caps_from_table()
 
     def _save_current_role_profile(self) -> None:
-        if not hasattr(self, "role_profile_edits"):
+        if not hasattr(self, "role_profile_edits") or not self.current_role_name:
             return
-        role_entry = self.role_gear_store.setdefault(
-            self.current_role_name,
-            {"gear_rows": self._empty_role_gear_rows(), "stat_caps": self._empty_role_stat_caps(), "role_profile": self._default_role_profile()},
-        )
+        role_entry = self.role_gear_store.setdefault(self.current_role_name, self._empty_role_entry())
         profile = self._default_role_profile()
+        profile["role_class"] = str(self.role_profile_class_combo.currentData())
         profile["mode"] = str(self.role_profile_mode_combo.currentData())
         profile["crit_quality_key"] = str(self.role_profile_crit_quality_combo.currentData())
         profile["dodge_quality_key"] = str(self.role_profile_dodge_quality_combo.currentData())
@@ -2033,45 +2337,67 @@ class MainWindow(QMainWindow):
     def _load_role_gear_to_table(self, role_name: str) -> None:
         if not hasattr(self, "role_stat_table"):
             return
-        role_entry = self.role_gear_store.get(
-            role_name,
-            {"gear_rows": self._empty_role_gear_rows(), "stat_caps": self._empty_role_stat_caps(), "role_profile": self._default_role_profile()},
-        )
+        role_entry = self.role_gear_store.get(role_name, self._empty_role_entry())
         rows = role_entry.get("gear_rows", self._empty_role_gear_rows())
         self._role_gear_loading = True
         self.role_stat_table.blockSignals(True)
         for row_idx in range(len(ROLE_GEAR_SLOTS)):
-            row_values = rows[row_idx] if row_idx < len(rows) else ["", "", "", "", "", "", ""]
-            for col_idx in range(1, 8):
+            row_values = rows[row_idx] if row_idx < len(rows) else ["" for _ in range(len(self.role_stat_names))]
+            for col_idx in range(1, len(self.role_stat_names) + 1):
                 text_value = row_values[col_idx - 1] if col_idx - 1 < len(row_values) else ""
                 item = self.role_stat_table.item(row_idx, col_idx)
                 if item is None:
                     item = QTableWidgetItem("")
                     self.role_stat_table.setItem(row_idx, col_idx, item)
                 item.setText(text_value)
+        for summary_row, label in [
+            (self._role_target_row_index(), ROLE_TARGET_SUMMARY_LABEL),
+            (self._role_current_row_index(), ROLE_CURRENT_SUMMARY_LABEL),
+        ]:
+            label_item = self.role_stat_table.item(summary_row, 0)
+            if label_item is None:
+                label_item = QTableWidgetItem(label)
+                label_item.setFlags(label_item.flags() & ~Qt.ItemIsEditable)
+                label_item.setTextAlignment(Qt.AlignCenter)
+                self.role_stat_table.setItem(summary_row, 0, label_item)
+            else:
+                label_item.setText(label)
+        self._style_role_summary_rows()
         self.role_stat_table.blockSignals(False)
         self._role_gear_loading = False
 
     def _load_role_caps(self, role_name: str) -> None:
-        if not hasattr(self, "role_cap_edits"):
+        if not hasattr(self, "role_stat_table"):
             return
-        role_entry = self.role_gear_store.get(
-            role_name,
-            {"gear_rows": self._empty_role_gear_rows(), "stat_caps": self._empty_role_stat_caps(), "role_profile": self._default_role_profile()},
-        )
+        role_entry = self.role_gear_store.get(role_name, self._empty_role_entry())
         caps = role_entry.get("stat_caps", self._empty_role_stat_caps())
-        for stat, edit in self.role_cap_edits.items():
-            edit.setText(str(caps.get(stat, "")).strip())
+        row_idx = self._role_target_row_index()
+        self.role_stat_table.blockSignals(True)
+        for stat_idx, stat in enumerate(self.role_stat_names, start=1):
+            item = self.role_stat_table.item(row_idx, stat_idx)
+            if item is None:
+                item = QTableWidgetItem("")
+                self.role_stat_table.setItem(row_idx, stat_idx, item)
+            if stat in ROLE_TARGET_STATS:
+                item.setText(str(caps.get(stat, "")).strip())
+            else:
+                item.setText("")
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        self.role_stat_table.blockSignals(False)
 
     def _load_role_profile(self, role_name: str) -> None:
         if not hasattr(self, "role_profile_edits"):
             return
-        role_entry = self.role_gear_store.get(
-            role_name,
-            {"gear_rows": self._empty_role_gear_rows(), "stat_caps": self._empty_role_stat_caps(), "role_profile": self._default_role_profile()},
-        )
+        role_entry = self.role_gear_store.get(role_name, self._empty_role_entry())
         profile = dict(self._default_role_profile())
         profile.update(role_entry.get("role_profile", {}))
+        self.role_profile_class_combo.blockSignals(True)
+        role_class = str(profile.get("role_class", "berserker"))
+        if role_class == "common":
+            role_class = "berserker"
+        idx = self.role_profile_class_combo.findData(role_class)
+        self.role_profile_class_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.role_profile_class_combo.blockSignals(False)
         self.role_profile_mode_combo.blockSignals(True)
         idx = self.role_profile_mode_combo.findData(profile["mode"])
         self.role_profile_mode_combo.setCurrentIndex(idx if idx >= 0 else 0)
@@ -2102,38 +2428,32 @@ class MainWindow(QMainWindow):
         self._apply_role_profile_base_stats()
         for key, edit in self.role_profile_edits.items():
             edit.setText(str(profile.get(key, "")))
+        if self.role_profile_edits.get("as_guild_bonus") and self.role_profile_edits["as_guild_bonus"].text().strip() in {"", "0", "0.0"}:
+            self.role_profile_edits["as_guild_bonus"].setText("5")
 
     def _on_role_cap_changed(self) -> None:
         self._save_current_role_caps()
         self._refresh_role_stat_overview()
         self._save_settings()
     def _clear_current_role_gear(self) -> None:
+        if not self.current_role_name:
+            QMessageBox.information(self, "提示", "请先选择一个已保存角色。")
+            return
         self.role_gear_store[self.current_role_name] = {
             "gear_rows": self._empty_role_gear_rows(),
             "stat_caps": self._empty_role_stat_caps(),
             "role_profile": self._default_role_profile(),
         }
-        self._load_role_gear_to_table(self.current_role_name)
-        self._load_role_caps(self.current_role_name)
-        self._load_role_profile(self.current_role_name)
-        self._refresh_role_stat_overview()
-        if hasattr(self, "match_preview_table"):
-            self.match_preview_table.setRowCount(0)
-        if hasattr(self, "match_placeholder_label"):
-            self.match_placeholder_label.setText("\u72b6\u6001: \u5df2\u6e05\u7a7a\u5f53\u524d\u89d2\u8272\u88c5\u5907\u3002")
+        self._load_current_role_into_editor()
         self._save_settings()
 
     def _refresh_role_stat_overview(self) -> None:
         if not hasattr(self, "role_stat_table") or not hasattr(self, "role_stat_summary_label"):
             return
-        filled = 0
-        stat_totals = {stat: 0.0 for stat in ROLE_GEAR_STATS}
         has_invalid = False
-        for row_idx in range(self.role_stat_table.rowCount()):
-            equip_item = self.role_stat_table.item(row_idx, 1)
-            if equip_item and equip_item.text().strip():
-                filled += 1
-            for stat_idx, stat in enumerate(ROLE_GEAR_STATS, start=2):
+        stat_totals = {stat: 0.0 for stat in self.role_stat_names}
+        for row_idx in range(len(ROLE_GEAR_SLOTS)):
+            for stat_idx, stat in enumerate(self.role_stat_names, start=1):
                 item = self.role_stat_table.item(row_idx, stat_idx)
                 raw_text = "" if item is None else item.text().strip()
                 if item is not None:
@@ -2146,144 +2466,68 @@ class MainWindow(QMainWindow):
                     has_invalid = True
                     if item is not None:
                         item.setBackground(Qt.red)
-        self.role_stat_summary_label.setText(
-            f"{self.current_role_name} \u7edf\u8ba1\u8fdb\u5ea6: {filled}/{len(ROLE_GEAR_SLOTS)} \u4e2a\u90e8\u4f4d\u5df2\u586b\u5199\u3002"
-        )
-
-        profile = self._default_role_profile()
-        role_entry = self.role_gear_store.get(self.current_role_name, {})
-        if isinstance(role_entry, dict):
-            profile.update(role_entry.get("role_profile", {}))
-
-        def _f(key: str, default: float = 0.0) -> float:
-            try:
-                return float(profile.get(key, "") or default)
-            except Exception:
-                return default
-
-        speed_stat = ROLE_GEAR_STATS[0]
-        crit_stat = ROLE_GEAR_STATS[1]
-        crit_damage_stat = ROLE_GEAR_STATS[2]
-        reduction_stat = ROLE_GEAR_STATS[3]
-        dodge_stat = ROLE_GEAR_STATS[4]
-
-        attack_actual = 0.0
-        attack_status = "\u7f3a\u5c11\u6b66\u5668\u653b\u901f\u503c"
-        attack_target = self.role_cap_edits[speed_stat].text().strip() if hasattr(self, "role_cap_edits") else ""
-        base = _f("as_base", 0.0)
-        trait = _f("as_trait_factor", 1.0)
-        guild_as = _f("as_guild_bonus", 0.0)
-        rune_as = _f("as_rune_bonus", 0.0)
-        mystic_as = _f("as_mystic_bonus", 10.0)
-        personality_as = _f("as_personality_bonus", 0.0)
-        pet_as = _f("as_pet_bonus", 0.0)
-        hunter_quality_as = _f("as_hunter_quality_bonus", 0.0)
-        equip_as = stat_totals[speed_stat]
-        if base > 0:
-            total_bonus_percent = equip_as + guild_as + rune_as + mystic_as + personality_as + pet_as + hunter_quality_as
-            attack_actual = max((1.0 - total_bonus_percent / 100.0) * base / max(trait, 1e-9), ATTACK_SPEED_FLOOR)
-            if attack_target:
-                try:
-                    target_val = max(float(attack_target), ATTACK_SPEED_FLOOR)
-                    attack_status = "\u5df2\u8fbe\u5230" if attack_actual <= target_val else f"\u8d85\u51fa {attack_actual - target_val:.3f}"
-                except Exception:
-                    attack_status = "\u6700\u5927\u503c\u975e\u6cd5"
+        summary_parts: list[str] = []
+        for stat in self.role_stat_names:
+            current_value = stat_totals[stat]
+            if stat == DEFAULT_ROLE_GEAR_STATS[0]:
+                calculated_attack_speed = self._calculate_role_attack_speed(stat_totals)
+                if calculated_attack_speed is not None:
+                    current_value = calculated_attack_speed
+            if stat == "攻速":
+                calculated_attack_speed = self._calculate_role_attack_speed(stat_totals)
+                if calculated_attack_speed is not None:
+                    current_value = calculated_attack_speed
+            if hasattr(self, "role_current_value_edits") and stat in self.role_current_value_edits:
+                self.role_current_value_edits[stat].setText(f"{current_value:.4f}")
+            if hasattr(self, "role_cap_edits") and stat in self.role_cap_edits:
+                target = self.role_cap_edits[stat].text().strip()
+                target_text = target if target else "-"
+                summary_parts.append(f"{stat} 当前 {stat_totals[stat]:g} / 目标 {target_text}")
             else:
-                attack_status = f"\u88c5\u5907\u653b\u901f\u52a0\u6210 {equip_as:.3f}%"
-
-        crit_quality_bonus, dodge_quality_bonus = self._get_role_quality_bonuses() if hasattr(self, "role_profile_crit_quality_combo") else (0.0, 0.0)
-
-        mode = str(self.role_profile_mode_combo.currentData()) if hasattr(self, "role_profile_mode_combo") else "melee"
-        preset = CRIT_DODGE_PRESETS.get(mode, CRIT_DODGE_PRESETS["melee"])
-
-        crit_cap_text = self.role_cap_edits[crit_stat].text().strip() if hasattr(self, "role_cap_edits") else ""
-        crit_cap = float(crit_cap_text) if crit_cap_text else DEFAULT_CRIT_TARGET
-        crit_base = min(stat_totals[crit_stat] + _f("crit_rune", 0.0), crit_cap)
-        pet_bonus = _f("pet_bonus", _f("crit_pet_bonus", 0.0))
-        crit_total = crit_base + crit_quality_bonus + pet_bonus + _f("crit_atlas", 0.0) + preset.get("crit_self_full", 0.0) + _f("crit_guild", 0.0) + _f("crit_mystic", 0.0)
-
-        dodge_cap_text = self.role_cap_edits[dodge_stat].text().strip() if hasattr(self, "role_cap_edits") else ""
-        dodge_cap = float(dodge_cap_text) if dodge_cap_text else DEFAULT_DODGE_TARGET
-        dodge_base = min(stat_totals[dodge_stat] + _f("dodge_rune", 0.0), dodge_cap)
-        dodge_total = dodge_base + dodge_quality_bonus + pet_bonus + _f("dodge_atlas", 0.0) + preset.get("dodge_self_full", 0.0) + _f("dodge_mystic", 0.0)
-
-        actual_values = {
-            speed_stat: attack_actual,
-            crit_stat: crit_total,
-            crit_damage_stat: stat_totals[crit_damage_stat],
-            reduction_stat: stat_totals[reduction_stat],
-            dodge_stat: dodge_total,
-        }
-        if hasattr(self, "role_summary_table"):
-            for row_idx, stat in enumerate(ROLE_GEAR_STATS):
-                actual_value = actual_values[stat]
-                max_text = self.role_cap_edits[stat].text().strip() if hasattr(self, "role_cap_edits") else ""
-                percent_text = "-"
-                actual_display = f"{actual_value[0]:.3f}~{actual_value[1]:.3f}" if isinstance(actual_value, tuple) else f"{actual_value:.3f}"
-                if stat == speed_stat and attack_status == "\u7f3a\u5c11\u6b66\u5668\u653b\u901f\u503c":
-                    status_text = attack_status
-                elif max_text:
-                    try:
-                        max_value = float(max_text)
-                        if stat == speed_stat:
-                            percent_text = f"{(max_value / actual_value * 100.0):.1f}%" if actual_value > 0 else "-"
-                            status_text = "\u5df2\u8fbe\u5230" if actual_value <= max_value else f"\u8d85\u51fa {actual_value - max_value:.3f}"
-                        elif isinstance(actual_value, tuple):
-                            percent_text = f"{(actual_value[1] / max_value * 100.0):.1f}%" if max_value > 0 else "-"
-                            if actual_value[0] >= max_value:
-                                status_text = "\u5df2\u8fbe\u5230"
-                            elif actual_value[1] >= max_value:
-                                status_text = "\u53ef\u80fd\u8fbe\u5230"
-                            else:
-                                status_text = f"\u8fd8\u5dee {max_value - actual_value[1]:.3f}"
-                        elif max_value > 0:
-                            percent = actual_value / max_value * 100.0
-                            percent_text = f"{percent:.1f}%"
-                            status_text = "\u5df2\u8fbe\u5230" if actual_value >= max_value else f"\u8fd8\u5dee {max_value - actual_value:.3f}"
-                        else:
-                            status_text = "\u6700\u5927\u503c\u9700\u5927\u4e8e 0"
-                    except Exception:
-                        status_text = "\u6700\u5927\u503c\u975e\u6cd5"
+                summary_parts.append(f"{stat} 当前 {stat_totals[stat]:g}")
+        self.role_stat_summary_label.setText("总和: " + " | ".join(summary_parts))
+        summary_parts = []
+        for stat in self.role_stat_names:
+            if hasattr(self, "role_current_value_edits") and stat in self.role_current_value_edits:
+                current_text = self.role_current_value_edits[stat].text().strip() or "0"
+            else:
+                current_text = f"{stat_totals[stat]:g}"
+            if hasattr(self, "role_cap_edits") and stat in self.role_cap_edits:
+                target = self.role_cap_edits[stat].text().strip()
+                target_text = target if target else "-"
+                summary_parts.append(f"{stat} 当前 {current_text} / 目标 {target_text}")
+            else:
+                summary_parts.append(f"{stat} 当前 {current_text}")
+        self.role_stat_summary_label.setText("总和: " + " | ".join(summary_parts))
+        if hasattr(self, "role_stat_table"):
+            target_row = self._role_target_row_index()
+            current_row = self._role_current_row_index()
+            self.role_stat_table.blockSignals(True)
+            caps = self._read_role_caps_from_table()
+            for stat_idx, stat in enumerate(self.role_stat_names, start=1):
+                target_item = self.role_stat_table.item(target_row, stat_idx)
+                current_item = self.role_stat_table.item(current_row, stat_idx)
+                if target_item is None:
+                    target_item = QTableWidgetItem("")
+                    self.role_stat_table.setItem(target_row, stat_idx, target_item)
+                if current_item is None:
+                    current_item = QTableWidgetItem("")
+                    current_item.setFlags(current_item.flags() & ~Qt.ItemIsEditable)
+                    self.role_stat_table.setItem(current_row, stat_idx, current_item)
+                if stat == DEFAULT_ROLE_GEAR_STATS[0]:
+                    current_display = self.role_current_value_edits.get(stat).text().strip() if hasattr(self, "role_current_value_edits") and stat in self.role_current_value_edits else ""
+                    current_item.setText(current_display if current_display else "0.2500")
                 else:
-                    status_text = attack_status if stat == speed_stat else "\u672a\u8bbe\u7f6e\u6700\u5927\u503c"
-                row_values = [stat, actual_display, max_text or "-", percent_text, status_text]
-                for col_idx, value in enumerate(row_values):
-                    item = self.role_summary_table.item(row_idx, col_idx)
-                    if item is None:
-                        item = QTableWidgetItem("")
-                        self.role_summary_table.setItem(row_idx, col_idx, item)
-                    item.setText(value)
-                    item.setTextAlignment(Qt.AlignCenter)
-            self.role_summary_table.resizeColumnsToContents()
-        if has_invalid and hasattr(self, "match_placeholder_label"):
-            self.match_placeholder_label.setText("状态: 存在非法数值，已用红框标记。")
-    def run_match_placeholder(self) -> None:
-        self._save_current_role_gear()
-        self._save_current_role_caps()
-        self._refresh_role_stat_overview()
-        mode = str(self.match_mode_combo.currentData()) if hasattr(self, "match_mode_combo") else "single"
-        goal = str(self.match_goal_combo.currentData()) if hasattr(self, "match_goal_combo") else "threshold"
-        mode_text = "单部位匹配" if mode == "single" else "整套匹配"
-        goal_text = "达标优先" if goal == "threshold" else "总分优先"
-        self.match_placeholder_label.setText(
-            f"状态: {self.current_role_name} 已触发占位流程（{mode_text} / {goal_text}）。后续版本将接入历史装备库自动配对。"
-        )
-
-        self.match_preview_table.setRowCount(len(ROLE_GEAR_SLOTS))
-        for row_idx, slot in enumerate(ROLE_GEAR_SLOTS):
-            current_item = self.role_stat_table.item(row_idx, 1) if hasattr(self, "role_stat_table") else None
-            current_name = current_item.text().strip() if current_item else ""
-            values = [
-                slot,
-                current_name or "-",
-                "待计算",
-                "占位结果：后续接入你的历史装备记录进行推荐",
-            ]
-            for col_idx, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setTextAlignment(Qt.AlignCenter if col_idx < 3 else Qt.AlignLeft | Qt.AlignVCenter)
-                self.match_preview_table.setItem(row_idx, col_idx, item)
-        self.match_preview_table.resizeColumnsToContents()
+                    current_item.setText(f"{stat_totals[stat]:.4f}")
+                if stat not in ROLE_TARGET_STATS:
+                    target_item.setText("")
+                    target_item.setFlags(target_item.flags() & ~Qt.ItemIsEditable)
+                else:
+                    target_item.setText(caps.get(stat, ""))
+            self._style_role_summary_rows()
+            self.role_stat_table.blockSignals(False)
+        if has_invalid:
+            self.role_stat_summary_label.setText(self.role_stat_summary_label.text() + " | 存在非法数值")
 
     def _build_settings_page(self, panel: QWidget) -> None:
         layout = QVBoxLayout(panel)
@@ -2361,106 +2605,38 @@ class MainWindow(QMainWindow):
         base_info_grid.setColumnStretch(7, 1)
         layout.addLayout(base_info_grid)
 
-        name_formula_row = QHBoxLayout()
-        name_formula_row.setSpacing(6)
-        head = QLabel("公式", panel)
-        head.setObjectName("FieldHeader")
-        head.setFixedWidth(FORMULA_HEAD_WIDTH)
-        name_formula_row.addWidget(head)
+        attr_title = QLabel("自定义属性", panel)
+        attr_title.setObjectName("SectionTitle")
+        layout.addWidget(attr_title)
 
-        for i in range(models.FIELD_COUNT):
-            attr_name_edit = QLineEdit(panel)
-            attr_name_edit.setText(DEFAULT_ATTR_NAMES[i])
-            attr_name_edit.setFixedWidth(FORMULA_INPUT_WIDTH)
-            attr_name_edit.setAlignment(Qt.AlignCenter)
-            attr_name_edit.editingFinished.connect(self._on_scheme_name_changed)
-            self.attr_name_edits.append(attr_name_edit)
-            name_formula_row.addWidget(attr_name_edit)
+        attr_header_row = QHBoxLayout()
+        attr_header_row.addWidget(self._make_field_header("属性名"), 2)
+        attr_header_row.addWidget(self._make_field_header("属性值"), 1)
+        attr_header_row.addWidget(self._make_field_header("系数名"), 2)
+        attr_header_row.addWidget(self._make_field_header("系数值"), 1)
+        attr_header_row.addWidget(self._make_field_header("操作"), 1)
+        layout.addLayout(attr_header_row)
 
-            mul = QLabel("*", panel)
-            mul.setObjectName("FieldHeader")
-            mul.setFixedWidth(FORMULA_SYMBOL_WIDTH)
-            mul.setAlignment(Qt.AlignCenter)
-            name_formula_row.addWidget(mul)
+        self.scheme_rows_container = QWidget(panel)
+        self.scheme_rows_layout = QHBoxLayout(self.scheme_rows_container)
+        self.scheme_rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.scheme_rows_layout.setSpacing(12)
+        layout.addWidget(self.scheme_rows_container)
 
-            coeff_name_edit = QLineEdit(panel)
-            coeff_name_edit.setText(DEFAULT_COEFF_NAMES[i])
-            coeff_name_edit.setFixedWidth(FORMULA_INPUT_WIDTH)
-            coeff_name_edit.setAlignment(Qt.AlignCenter)
-            coeff_name_edit.editingFinished.connect(self._on_scheme_name_changed)
-            self.weight_name_edits.append(coeff_name_edit)
-            name_formula_row.addWidget(coeff_name_edit)
+        attr_btn_row = QHBoxLayout()
+        btn_add_attr = QPushButton("新增属性", panel)
+        btn_add_attr.setObjectName("GhostButton")
+        btn_add_attr.clicked.connect(self._add_scheme_row)
+        attr_btn_row.addWidget(btn_add_attr)
+        attr_btn_row.addStretch()
+        layout.addLayout(attr_btn_row)
 
-            if i < models.FIELD_COUNT - 1:
-                plus = QLabel("+", panel)
-                plus.setObjectName("FieldHeader")
-                plus.setFixedWidth(FORMULA_SYMBOL_WIDTH)
-                plus.setAlignment(Qt.AlignCenter)
-                name_formula_row.addWidget(plus)
-
-        eq_name = QLabel("=", panel)
-        eq_name.setObjectName("FieldHeader")
-        eq_name.setFixedWidth(FORMULA_SYMBOL_WIDTH)
-        eq_name.setAlignment(Qt.AlignCenter)
-        name_formula_row.addWidget(eq_name)
-        score_literal = QLabel("score", panel)
-        score_literal.setFixedWidth(FORMULA_RESULT_WIDTH)
-        score_literal.setAlignment(Qt.AlignCenter)
-        name_formula_row.addWidget(score_literal)
-        name_formula_row.addStretch()
-        layout.addLayout(name_formula_row)
-
-        value_formula_row = QHBoxLayout()
-        value_formula_row.setSpacing(6)
-        value_head = QLabel("数值", panel)
-        value_head.setObjectName("FieldHeader")
-        value_head.setFixedWidth(FORMULA_HEAD_WIDTH)
-        value_formula_row.addWidget(value_head)
-
-        for i in range(models.FIELD_COUNT):
-            attr_edit = QLineEdit(panel)
-            attr_edit.setPlaceholderText("0")
-            attr_edit.setFixedWidth(FORMULA_INPUT_WIDTH)
-            attr_edit.setAlignment(Qt.AlignCenter)
-            attr_edit.returnPressed.connect(self.calculate_score)
-            self.attr_value_edits.append(attr_edit)
-            value_formula_row.addWidget(attr_edit)
-
-            mul = QLabel("*", panel)
-            mul.setObjectName("FieldHeader")
-            mul.setFixedWidth(FORMULA_SYMBOL_WIDTH)
-            mul.setAlignment(Qt.AlignCenter)
-            value_formula_row.addWidget(mul)
-
-            coeff_edit = ClickInputLineEdit(panel)
-            coeff_edit.setText("0")
-            coeff_edit.setFixedWidth(FORMULA_INPUT_WIDTH)
-            coeff_edit.setReadOnly(True)
-            coeff_edit.setAlignment(Qt.AlignCenter)
-            coeff_edit.setToolTip("点击输入系数值")
-            coeff_edit.clicked.connect(lambda _=None, idx=i: self._edit_coeff_value(idx))
-            self.weight_value_edits.append(coeff_edit)
-            value_formula_row.addWidget(coeff_edit)
-
-            if i < models.FIELD_COUNT - 1:
-                plus = QLabel("+", panel)
-                plus.setObjectName("FieldHeader")
-                plus.setFixedWidth(FORMULA_SYMBOL_WIDTH)
-                plus.setAlignment(Qt.AlignCenter)
-                value_formula_row.addWidget(plus)
-
-        eq_value = QLabel("=", panel)
-        eq_value.setObjectName("FieldHeader")
-        eq_value.setFixedWidth(FORMULA_SYMBOL_WIDTH)
-        eq_value.setAlignment(Qt.AlignCenter)
-        value_formula_row.addWidget(eq_value)
-        self.inline_score_value_label = QLabel("0.000", panel)
-        self.inline_score_value_label.setObjectName("ScoreValue")
-        self.inline_score_value_label.setFixedWidth(FORMULA_RESULT_WIDTH)
-        self.inline_score_value_label.setAlignment(Qt.AlignCenter)
-        value_formula_row.addWidget(self.inline_score_value_label)
-        value_formula_row.addStretch()
-        layout.addLayout(value_formula_row)
+        self._rebuild_scheme_rows(
+            attr_names=DEFAULT_ATTR_NAMES[:],
+            weight_names=DEFAULT_COEFF_NAMES[:],
+            attr_values=["" for _ in DEFAULT_ATTR_NAMES],
+            weight_values=["0" for _ in DEFAULT_ATTR_NAMES],
+        )
 
         threshold_row = QHBoxLayout()
         threshold_label = QLabel("阈值", panel)
@@ -2500,17 +2676,21 @@ class MainWindow(QMainWindow):
         score_row = QHBoxLayout()
         self.score_label = QLabel("总分: 0.000", panel)
         self.score_label.setObjectName("TitleLabel")
+        self.inline_score_value_label = QLabel("0.000", panel)
+        self.inline_score_value_label.setObjectName("ScoreValue")
         self.pass_label = QLabel("❌ 未达标", panel)
         self.pass_label.setObjectName("StatusFail")
         score_row.addWidget(self.score_label)
+        score_row.addSpacing(12)
+        score_row.addWidget(self.inline_score_value_label)
         score_row.addSpacing(12)
         score_row.addWidget(self.pass_label)
         score_row.addStretch()
         layout.addLayout(score_row)
 
-        self.formula_value_label = QLabel("当前: 0*0 + 0*0 + 0*0 + 0*0 + 0*0 = 0.000", panel)
+        self.formula_value_label = QLabel("当前: 0 = 0.000", panel)
         self.formula_value_label.setObjectName("FormulaLine")
-        self.contribution_line_label = QLabel("贡献: 项1=0.000 | 项2=0.000 | 项3=0.000 | 项4=0.000 | 项5=0.000", panel)
+        self.contribution_line_label = QLabel("贡献: 项1=0.000", panel)
         self.contribution_line_label.setObjectName("FormulaLine")
         self.calc_error_label = QLabel("", panel)
         self.calc_error_label.setObjectName("ErrorLabel")
@@ -2521,6 +2701,149 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.contribution_line_label)
         layout.addWidget(self.calc_error_label)
         layout.addStretch()
+
+    def _make_field_header(self, text: str) -> QLabel:
+        label = QLabel(text, self)
+        label.setObjectName("FieldHeader")
+        return label
+
+    def _default_attr_name_for_index(self, index: int) -> str:
+        if index < len(DEFAULT_ATTR_NAMES):
+            return DEFAULT_ATTR_NAMES[index]
+        return f"属性{index + 1}"
+
+    def _default_weight_name_for_index(self, index: int) -> str:
+        if index < len(DEFAULT_COEFF_NAMES):
+            return DEFAULT_COEFF_NAMES[index]
+        return f"权重{index + 1}"
+
+    def _clear_scheme_row_widgets(self) -> None:
+        while self.scheme_rows_layout.count():
+            item = self.scheme_rows_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        self.scheme_row_widgets.clear()
+        self.attr_name_edits.clear()
+        self.weight_name_edits.clear()
+        self.attr_value_edits.clear()
+        self.weight_value_edits.clear()
+
+    def _rebuild_scheme_rows(
+        self,
+        attr_names: list[str],
+        weight_names: list[str],
+        attr_values: list[str] | None = None,
+        weight_values: list[str] | None = None,
+    ) -> None:
+        attr_values = attr_values or []
+        weight_values = weight_values or []
+        row_count = max(len(attr_names), len(weight_names), len(attr_values), len(weight_values), 1)
+        self._clear_scheme_row_widgets()
+
+        for idx in range(row_count):
+            row_widget = QWidget(self.scheme_rows_container)
+            row_layout = QVBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(6)
+            row_widget.setFixedWidth(180)
+
+            attr_name_edit = QLineEdit(row_widget)
+            attr_name_edit.setText(attr_names[idx] if idx < len(attr_names) else self._default_attr_name_for_index(idx))
+            attr_name_edit.setPlaceholderText("属性名")
+            attr_name_edit.editingFinished.connect(self._on_scheme_name_changed)
+            row_layout.addWidget(attr_name_edit)
+
+            attr_value_edit = QLineEdit(row_widget)
+            attr_value_edit.setText(attr_values[idx] if idx < len(attr_values) else "")
+            attr_value_edit.setPlaceholderText("0")
+            attr_value_edit.returnPressed.connect(self.calculate_score)
+            row_layout.addWidget(attr_value_edit)
+
+            weight_name_edit = QLineEdit(row_widget)
+            weight_name_edit.setText(weight_names[idx] if idx < len(weight_names) else self._default_weight_name_for_index(idx))
+            weight_name_edit.setPlaceholderText("系数名")
+            weight_name_edit.editingFinished.connect(self._on_scheme_name_changed)
+            row_layout.addWidget(weight_name_edit)
+
+            weight_value_edit = QLineEdit(row_widget)
+            weight_value_edit.setText(weight_values[idx] if idx < len(weight_values) else "0")
+            weight_value_edit.setPlaceholderText("0")
+            weight_value_edit.returnPressed.connect(self.calculate_score)
+            row_layout.addWidget(weight_value_edit)
+
+            btn_remove = QPushButton("删除", row_widget)
+            btn_remove.setObjectName("GhostButton")
+            btn_remove.clicked.connect(lambda _=False, row_idx=idx: self._remove_scheme_row(row_idx))
+            row_layout.addWidget(btn_remove)
+
+            self.scheme_rows_layout.addWidget(row_widget)
+            self.scheme_row_widgets.append({"row": row_widget, "remove": btn_remove})
+            self.attr_name_edits.append(attr_name_edit)
+            self.attr_value_edits.append(attr_value_edit)
+            self.weight_name_edits.append(weight_name_edit)
+            self.weight_value_edits.append(weight_value_edit)
+
+        self.scheme_rows_layout.addStretch()
+        self._refresh_scheme_row_remove_buttons()
+        self._refresh_sort_rule_field_options()
+        self._refresh_records_table_headers()
+
+    def _add_scheme_row(self) -> None:
+        attr_names = self._current_attr_names()
+        weight_names = self._current_coeff_names()
+        attr_values = [edit.text() for edit in self.attr_value_edits]
+        weight_values = [edit.text() for edit in self.weight_value_edits]
+        next_index = len(attr_names)
+        attr_names.append(self._default_attr_name_for_index(next_index))
+        weight_names.append(self._default_weight_name_for_index(next_index))
+        attr_values.append("")
+        weight_values.append("0")
+        self._rebuild_scheme_rows(attr_names, weight_names, attr_values, weight_values)
+        self._save_global_scheme()
+        self.calculate_score()
+
+    def _remove_scheme_row(self, row_idx: int) -> None:
+        if len(self.attr_name_edits) <= 1:
+            QMessageBox.information(self, "提示", "至少保留一个属性。")
+            return
+        attr_names = self._current_attr_names()
+        weight_names = self._current_coeff_names()
+        attr_values = [edit.text() for edit in self.attr_value_edits]
+        weight_values = [edit.text() for edit in self.weight_value_edits]
+        for values in [attr_names, weight_names, attr_values, weight_values]:
+            if 0 <= row_idx < len(values):
+                values.pop(row_idx)
+        self._rebuild_scheme_rows(attr_names, weight_names, attr_values, weight_values)
+        self._save_global_scheme()
+        self.calculate_score()
+
+    def _refresh_scheme_row_remove_buttons(self) -> None:
+        disable_remove = len(self.scheme_row_widgets) <= 1
+        for row_meta in self.scheme_row_widgets:
+            remove_btn = row_meta["remove"]
+            if isinstance(remove_btn, QPushButton):
+                remove_btn.setEnabled(not disable_remove)
+
+    def _refresh_records_table_headers(self) -> None:
+        if not hasattr(self, "records_table"):
+            return
+        attr_names = self._current_attr_names() if self.attr_name_edits else DEFAULT_ATTR_NAMES[:]
+        record_field_count = max((len(record.attrs) for record in self.records), default=0)
+        while len(attr_names) < record_field_count:
+            attr_names.append(self._default_attr_name_for_index(len(attr_names)))
+        headers = ["种类", "装备名", *attr_names, "总分", "达标", "保存时间"]
+        self.records_table.setColumnCount(len(headers))
+        self.records_table.setHorizontalHeaderLabels(headers)
+        self.records_table.horizontalHeader().setStretchLastSection(True)
+
+    def _refresh_sort_rule_field_options(self) -> None:
+        attr_names = self._current_attr_names() if self.attr_name_edits else DEFAULT_ATTR_NAMES[:]
+        record_field_count = max((len(record.attrs) for record in self.records), default=0)
+        while len(attr_names) < record_field_count:
+            attr_names.append(self._default_attr_name_for_index(len(attr_names)))
+        for row in self.sort_rule_rows:
+            row.update_field_options(attr_names)
 
     def _build_records_panel(self, panel: QWidget) -> None:
         layout = QVBoxLayout(panel)
@@ -2611,8 +2934,7 @@ class MainWindow(QMainWindow):
         sort_layout.addLayout(sort_btns)
         layout.addWidget(sort_card)
 
-        self.records_table = QTableWidget(0, 10, panel)
-        self.records_table.setHorizontalHeaderLabels(["种类", "装备名", "a1", "a2", "a3", "a4", "a5", "总分", "达标", "保存时间"])
+        self.records_table = QTableWidget(0, 0, panel)
         self.records_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.records_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.records_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -2620,6 +2942,7 @@ class MainWindow(QMainWindow):
         self.records_table.verticalHeader().setVisible(False)
         self.records_table.verticalHeader().setDefaultSectionSize(36)
         layout.addWidget(self.records_table, 1)
+        self._refresh_records_table_headers()
 
     def _sync_category_combo(self) -> None:
         self.category_combo.blockSignals(True)
@@ -2664,23 +2987,22 @@ class MainWindow(QMainWindow):
             self.global_threshold = models.parse_float(str(settings.get("threshold", old_threshold)), "")[0]
             self.saved_crit_atlas = str(settings.get("cap_crit_atlas", self.saved_crit_atlas))
             self.saved_dodge_atlas = str(settings.get("cap_dodge_atlas", self.saved_dodge_atlas))
+            raw_role_stat_names = settings.get("role_stat_names", DEFAULT_ROLE_GEAR_STATS[:])
+            self.role_stat_names = [str(item).strip() for item in raw_role_stat_names if str(item).strip()] or DEFAULT_ROLE_GEAR_STATS[:]
             self.role_gear_store = self._normalize_role_gear_store(settings.get("role_gear_store", {}))
-            saved_role_name = str(settings.get("current_role_name", self.current_role_name))
-            self.current_role_name = saved_role_name if saved_role_name in ROLE_CHARACTER_NAMES else ROLE_CHARACTER_NAMES[0]
+            if not self.role_gear_store:
+                self.role_gear_store = {DEFAULT_ROLE_NAME: self._empty_role_entry()}
+            saved_role_name = str(settings.get("current_role_name", self.current_role_name)).strip()
+            self.current_role_name = saved_role_name if saved_role_name in self.role_gear_store else next(iter(self.role_gear_store))
             self.crit_atlas_edit.setText(self.saved_crit_atlas)
             self.dodge_atlas_edit.setText(self.saved_dodge_atlas)
             if hasattr(self, "role_select_combo"):
-                self.role_select_combo.blockSignals(True)
-                self.role_select_combo.setCurrentText(self.current_role_name)
-                self.role_select_combo.blockSignals(False)
+                self._sync_role_selector()
             if hasattr(self, "role_stat_table"):
-                self._load_role_gear_to_table(self.current_role_name)
+                self._rebuild_role_stat_caps_ui()
+                self._apply_role_stat_table_headers()
+                self._load_current_role_into_editor()
                 self._refresh_role_stat_overview()
-            if hasattr(self, "match_preview_table"):
-                self.match_preview_table.setRowCount(0)
-            if hasattr(self, "match_placeholder_label"):
-                self.match_placeholder_label.setText("状态: 未开始。点击“开始历史配对（占位）”生成占位结果。")
-
             self._load_global_scheme()
             self.threshold_edit.setText(f"{self.global_threshold:g}")
             self._sync_category_combo()
@@ -2700,20 +3022,26 @@ class MainWindow(QMainWindow):
         if self.global_scheme_path.exists():
             try:
                 attr_names, coeff_names, coeff_values, _warnings = csv_io.load_scheme_csv(str(self.global_scheme_path))
-                for i in range(models.FIELD_COUNT):
-                    self.attr_name_edits[i].setText(attr_names[i] or DEFAULT_ATTR_NAMES[i])
-                    self.weight_name_edits[i].setText(coeff_names[i] or DEFAULT_COEFF_NAMES[i])
-                    self.weight_value_edits[i].setText(f"{coeff_values[i]:g}")
+                self._rebuild_scheme_rows(
+                    attr_names=attr_names,
+                    weight_names=coeff_names,
+                    attr_values=[edit.text() for edit in self.attr_value_edits],
+                    weight_values=[f"{value:g}" for value in coeff_values],
+                )
             except Exception:
-                for i in range(models.FIELD_COUNT):
-                    self.attr_name_edits[i].setText(DEFAULT_ATTR_NAMES[i])
-                    self.weight_name_edits[i].setText(DEFAULT_COEFF_NAMES[i])
-                    self.weight_value_edits[i].setText("0")
+                self._rebuild_scheme_rows(
+                    attr_names=DEFAULT_ATTR_NAMES[:],
+                    weight_names=DEFAULT_COEFF_NAMES[:],
+                    attr_values=["" for _ in DEFAULT_ATTR_NAMES],
+                    weight_values=["0" for _ in DEFAULT_ATTR_NAMES],
+                )
         else:
-            for i in range(models.FIELD_COUNT):
-                self.attr_name_edits[i].setText(DEFAULT_ATTR_NAMES[i])
-                self.weight_name_edits[i].setText(DEFAULT_COEFF_NAMES[i])
-                self.weight_value_edits[i].setText("0")
+            self._rebuild_scheme_rows(
+                attr_names=DEFAULT_ATTR_NAMES[:],
+                weight_names=DEFAULT_COEFF_NAMES[:],
+                attr_values=["" for _ in DEFAULT_ATTR_NAMES],
+                weight_values=["0" for _ in DEFAULT_ATTR_NAMES],
+            )
         self._suspend_auto_save = False
 
     def _save_global_scheme(self) -> None:
@@ -2728,18 +3056,20 @@ class MainWindow(QMainWindow):
         )
 
     def _current_attr_names(self) -> list[str]:
-        return [edit.text().strip() or DEFAULT_ATTR_NAMES[i] for i, edit in enumerate(self.attr_name_edits)]
+        return [edit.text().strip() or self._default_attr_name_for_index(i) for i, edit in enumerate(self.attr_name_edits)]
 
     def _current_coeff_names(self) -> list[str]:
-        return [edit.text().strip() or DEFAULT_COEFF_NAMES[i] for i, edit in enumerate(self.weight_name_edits)]
+        return [edit.text().strip() or self._default_weight_name_for_index(i) for i, edit in enumerate(self.weight_name_edits)]
 
     def _on_scheme_name_changed(self) -> None:
         for i, edit in enumerate(self.attr_name_edits):
             if edit.text().strip() == "":
-                edit.setText(DEFAULT_ATTR_NAMES[i])
+                edit.setText(self._default_attr_name_for_index(i))
         for i, edit in enumerate(self.weight_name_edits):
             if edit.text().strip() == "":
-                edit.setText(DEFAULT_COEFF_NAMES[i])
+                edit.setText(self._default_weight_name_for_index(i))
+        self._refresh_records_table_headers()
+        self._refresh_sort_rule_field_options()
         self._save_global_scheme()
         self.calculate_score()
 
@@ -2762,25 +3092,6 @@ class MainWindow(QMainWindow):
         self._save_categories()
         self._sync_category_combo()
         self.category_combo.setCurrentText(category)
-
-    def _edit_coeff_value(self, index: int) -> None:
-        if not (0 <= index < len(self.weight_value_edits)):
-            return
-        current = models.parse_float(self.weight_value_edits[index].text(), "")[0]
-        value, ok = QInputDialog.getDouble(
-            self,
-            f"设置系数{index + 1}",
-            f"请输入 系数{index + 1} 的值:",
-            current,
-            -999999999.0,
-            999999999.0,
-            6,
-        )
-        if not ok:
-            return
-        self.weight_value_edits[index].setText(f"{value:g}")
-        self._save_global_scheme()
-        self.calculate_score()
 
     def _edit_threshold_value(self) -> None:
         current = models.parse_float(self.threshold_edit.text(), "")[0]
@@ -2829,8 +3140,8 @@ class MainWindow(QMainWindow):
         self.pass_label.style().unpolish(self.pass_label)
         self.pass_label.style().polish(self.pass_label)
 
-        terms = [f"{snapshot.attrs[i]:g}*{snapshot.weights[i]:g}" for i in range(models.FIELD_COUNT)]
-        contributions = [f"项{i + 1}={snapshot.contributions[i]:.3f}" for i in range(models.FIELD_COUNT)]
+        terms = [f"{attr:g}*{weight:g}" for attr, weight in zip(snapshot.attrs, snapshot.weights)]
+        contributions = [f"{name}={value:.3f}" for name, value in zip(self._current_attr_names(), snapshot.contributions)]
         self.formula_value_label.setText("当前: " + " + ".join(terms) + f" = {snapshot.score:.3f}")
         self.contribution_line_label.setText("贡献: " + " | ".join(contributions))
 
@@ -2874,10 +3185,12 @@ class MainWindow(QMainWindow):
             return
 
         self._suspend_auto_save = True
-        for i in range(models.FIELD_COUNT):
-            self.attr_name_edits[i].setText(attr_names[i] or DEFAULT_ATTR_NAMES[i])
-            self.weight_name_edits[i].setText(coeff_names[i] or DEFAULT_COEFF_NAMES[i])
-            self.weight_value_edits[i].setText(f"{coeff_values[i]:g}")
+        self._rebuild_scheme_rows(
+            attr_names=attr_names,
+            weight_names=coeff_names,
+            attr_values=[edit.text() for edit in self.attr_value_edits],
+            weight_values=[f"{value:g}" for value in coeff_values],
+        )
         self._suspend_auto_save = False
         self._save_global_scheme()
         self.calculate_score()
@@ -3006,6 +3319,12 @@ class MainWindow(QMainWindow):
         filtered_pairs = self._get_filtered_pairs()
         sorted_pairs = self._sorted_pairs(filtered_pairs, show_warning=False)
         self.visible_record_indexes = [idx for idx, _ in sorted_pairs]
+        self._refresh_records_table_headers()
+        self._refresh_sort_rule_field_options()
+        field_count = max(
+            len(self._current_attr_names()),
+            max((len(record.attrs) for _, record in sorted_pairs), default=0),
+        )
 
         self.records_table.setRowCount(len(sorted_pairs))
         visible_records: list[EquipRecord] = []
@@ -3014,7 +3333,7 @@ class MainWindow(QMainWindow):
             values = [
                 record.category,
                 record.name,
-                *[f"{v:g}" for v in record.attrs[:5]],
+                *[f"{v:g}" for v in (record.attrs[:field_count] + [0.0] * max(0, field_count - len(record.attrs)))],
                 f"{record.score:.3f}",
                 "✅" if record.pass_threshold else "❌",
                 record.created_at,
@@ -3053,6 +3372,7 @@ class MainWindow(QMainWindow):
 
     def _create_sort_rule(self, field: str, asc: bool) -> None:
         row = SortRuleRow(self._move_rule_up, self._move_rule_down, self._delete_rule, self)
+        row.update_field_options(self._current_attr_names())
         row.set_rule(field, asc)
         self.sort_rule_rows.append(row)
 

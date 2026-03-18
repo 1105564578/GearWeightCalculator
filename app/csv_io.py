@@ -6,42 +6,7 @@ from app.core import EquipRecord
 
 
 SCHEME_HEADER = ["attr_name", "weight_name", "weight"]
-SCHEME_ROW_COUNT = 5
-
-EQUIP_HEADER_V2 = [
-    "category",
-    "name",
-    "a1",
-    "a2",
-    "a3",
-    "a4",
-    "a5",
-    "w1",
-    "w2",
-    "w3",
-    "w4",
-    "w5",
-    "score",
-    "pass_threshold",
-    "created_at",
-]
-
-EQUIP_HEADER_V1 = [
-    "name",
-    "a1",
-    "a2",
-    "a3",
-    "a4",
-    "a5",
-    "w1",
-    "w2",
-    "w3",
-    "w4",
-    "w5",
-    "score",
-    "pass_threshold",
-    "created_at",
-]
+FIXED_EXPORT_SUFFIX = ["score", "pass_threshold", "created_at"]
 
 
 def save_scheme_csv(
@@ -50,14 +15,15 @@ def save_scheme_csv(
     weight_names: list[str],
     weights: list[float],
 ) -> None:
-    fixed_attr_names = _normalize_text_list(attr_names, SCHEME_ROW_COUNT)
-    fixed_weight_names = _normalize_text_list(weight_names, SCHEME_ROW_COUNT)
-    fixed_weights = _normalize_float_list(weights, SCHEME_ROW_COUNT)
+    row_count = max(len(attr_names), len(weight_names), len(weights), 1)
+    fixed_attr_names = _normalize_text_list(attr_names, row_count)
+    fixed_weight_names = _normalize_text_list(weight_names, row_count)
+    fixed_weights = _normalize_float_list(weights, row_count)
 
     with open(file_path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(SCHEME_HEADER)
-        for idx in range(SCHEME_ROW_COUNT):
+        for idx in range(row_count):
             writer.writerow([fixed_attr_names[idx], fixed_weight_names[idx], f"{fixed_weights[idx]:g}"])
 
 
@@ -75,10 +41,9 @@ def load_scheme_csv(file_path: str) -> tuple[list[str], list[str], list[float], 
             raise ValueError("方案 CSV 表头必须是 attr_name,weight_name,weight")
         rows = list(reader)
 
-    for idx, row in enumerate(rows[:SCHEME_ROW_COUNT], start=1):
+    for idx, row in enumerate(rows, start=1):
         attr_names.append((row.get("attr_name") or "").strip())
         weight_names.append((row.get("weight_name") or "").strip())
-
         raw_weight = (row.get("weight") or "").strip()
         if raw_weight == "":
             weights.append(0.0)
@@ -89,20 +54,23 @@ def load_scheme_csv(file_path: str) -> tuple[list[str], list[str], list[float], 
             weights.append(0.0)
             warnings.append(f"第 {idx} 行 weight 非法，已按 0 处理。")
 
-    while len(attr_names) < SCHEME_ROW_COUNT:
-        attr_names.append("")
-        weight_names.append("")
-        weights.append(0.0)
+    if not attr_names:
+        attr_names = [""]
+        weight_names = [""]
+        weights = [0.0]
 
     return attr_names, weight_names, weights, warnings
 
 
 def export_equips_csv(file_path: str, records: list[EquipRecord]) -> None:
+    field_count = max((max(len(record.attrs), len(record.weights)) for record in records), default=1)
+    header = _build_equip_header(field_count)
+
     with open(file_path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(EQUIP_HEADER_V2)
+        writer.writerow(header)
         for record in records:
-            writer.writerow(record.to_export_row())
+            writer.writerow(record.to_export_row(field_count))
 
 
 def import_equips_csv(file_path: str) -> tuple[list[EquipRecord], list[str]]:
@@ -114,16 +82,22 @@ def import_equips_csv(file_path: str) -> tuple[list[EquipRecord], list[str]]:
         if not reader.fieldnames:
             raise ValueError("CSV 缺少表头。")
         normalized = [name.strip() for name in reader.fieldnames]
-        if normalized != EQUIP_HEADER_V1 and normalized != EQUIP_HEADER_V2:
-            raise ValueError(
-                "装备 CSV 表头必须是 category,name,a1,a2,a3,a4,a5,w1,w2,w3,w4,w5,score,pass_threshold,created_at"
-            )
+
+        has_category = normalized[:2] == ["category", "name"]
+        if not has_category and (not normalized or normalized[0] != "name"):
+            raise ValueError("装备 CSV 表头必须以 category,name 或 name 开头。")
+
+        field_count = _detect_field_count(normalized, has_category)
+        expected = _build_equip_header(field_count, include_category=has_category)
+        if normalized != expected:
+            raise ValueError("装备 CSV 表头不匹配，请检查 a1..an / w1..wn 列是否成对且顺序正确。")
 
         for line_no, row in enumerate(reader, start=2):
-            category = (row.get("category") or "").strip() or "通用"
+            category = (row.get("category") or "").strip() if has_category else ""
+            category = category or "通用"
             name = (row.get("name") or "").strip()
-            attrs = [_safe_float(row.get(f"a{i}"), f"a{i}", line_no, warnings) for i in range(1, 6)]
-            weights = [_safe_float(row.get(f"w{i}"), f"w{i}", line_no, warnings) for i in range(1, 6)]
+            attrs = [_safe_float(row.get(f"a{i}"), f"a{i}", line_no, warnings) for i in range(1, field_count + 1)]
+            weights = [_safe_float(row.get(f"w{i}"), f"w{i}", line_no, warnings) for i in range(1, field_count + 1)]
             score = _safe_float(row.get("score"), "score", line_no, warnings)
             pass_threshold = _safe_bool(row.get("pass_threshold"))
             created_at = (row.get("created_at") or "").strip()
@@ -141,6 +115,30 @@ def import_equips_csv(file_path: str) -> tuple[list[EquipRecord], list[str]]:
             )
 
     return records, sorted(set(warnings))
+
+
+def _build_equip_header(field_count: int, include_category: bool = True) -> list[str]:
+    header = ["name"]
+    if include_category:
+        header = ["category", "name"]
+    header.extend([f"a{i}" for i in range(1, field_count + 1)])
+    header.extend([f"w{i}" for i in range(1, field_count + 1)])
+    header.extend(FIXED_EXPORT_SUFFIX)
+    return header
+
+
+def _detect_field_count(headers: list[str], include_category: bool) -> int:
+    start_idx = 2 if include_category else 1
+    suffix_start = len(headers) - len(FIXED_EXPORT_SUFFIX)
+    variable_headers = headers[start_idx:suffix_start]
+    if len(variable_headers) % 2 != 0 or not variable_headers:
+        raise ValueError("装备 CSV 属性列数量不正确。")
+    field_count = len(variable_headers) // 2
+    expected_attrs = [f"a{i}" for i in range(1, field_count + 1)]
+    expected_weights = [f"w{i}" for i in range(1, field_count + 1)]
+    if variable_headers[:field_count] != expected_attrs or variable_headers[field_count:] != expected_weights:
+        raise ValueError("装备 CSV 属性列命名不正确。")
+    return field_count
 
 
 def _normalize_text_list(values: list[str], size: int) -> list[str]:
@@ -170,4 +168,4 @@ def _safe_float(raw: str | None, field: str, line_no: int, warnings: list[str]) 
 
 def _safe_bool(raw: str | None) -> bool:
     text = "" if raw is None else str(raw).strip().lower()
-    return text in {"true", "1", "yes", "y", "✅"}
+    return text in {"true", "1", "yes", "y", "是"}
